@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram to InkyPi Photo Frame
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/photo-frame
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/photo-frame/.venv/bin/python -m app.main --config /opt/photo-frame/config/config.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

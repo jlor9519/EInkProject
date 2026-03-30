@@ -1,0 +1,22 @@
+<div class="form-group">
+  <label for="payload_path">Bridge payload path</label>
+  <input
+    id="payload_path"
+    name="payload_path"
+    type="text"
+    class="form-control"
+    placeholder="/opt/photo-frame/data/inkypi/current.json"
+  />
+  <small class="form-text text-muted">
+    This should point to the JSON payload written by the Telegram photo frame companion app.
+  </small>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  if (typeof loadPluginSettings !== 'undefined' && loadPluginSettings) {
+    document.getElementById('payload_path').value = pluginSettings.payload_path || '';
+  }
+});
+</script>
+

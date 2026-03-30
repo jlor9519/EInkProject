@@ -1,0 +1,44 @@
+telegram:
+  bot_token_env: TELEGRAM_BOT_TOKEN
+
+security:
+  admin_user_ids: []
+  whitelisted_user_ids: []
+
+database:
+  path: data/db/photo_frame.db
+
+storage:
+  incoming_dir: data/incoming
+  rendered_dir: data/rendered
+  cache_dir: data/cache
+  archive_dir: data/archive
+  inkypi_payload_dir: data/inkypi
+  current_payload_path: data/inkypi/current.json
+  current_image_path: data/inkypi/current.png
+  keep_recent_rendered: 20
+
+display:
+  width: 800
+  height: 480
+  caption_height: 44
+  margin: 18
+  metadata_font_size: 14
+  caption_font_size: 20
+  caption_character_limit: 72
+  max_caption_lines: 1
+  font_path: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+  background_color: "#F7F3EA"
+  text_color: "#111111"
+  divider_color: "#3A3A3A"
+
+inkypi:
+  repo_path: ~/InkyPi
+  install_path: /usr/local/inkypi
+  validated_commit: main
+  waveshare_model: epd7in3e
+  plugin_id: telegram_frame
+  payload_dir: data/inkypi
+  update_method: http_update_now    # http_update_now or command
+  update_now_url: http://127.0.0.1/update_now
+  refresh_command: sudo systemctl restart inkypi.service
