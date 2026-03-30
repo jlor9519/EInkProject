@@ -78,6 +78,36 @@ After the installer finishes:
 
 Run `bash scripts/update.sh` to pull the latest changes and restart the service.
 
+### Uninstalling
+
+To remove everything the installer set up:
+
+1. Stop and disable the systemd service:
+   ```bash
+   sudo systemctl stop photo-frame.service
+   sudo systemctl disable photo-frame.service
+   sudo rm /etc/systemd/system/photo-frame.service
+   sudo systemctl daemon-reload
+   ```
+2. Remove the sudoers file the installer created:
+   ```bash
+   sudo rm -f /etc/sudoers.d/photo-frame-inkypi
+   ```
+3. Delete the project directory (contains the app, config, database, and photos):
+   ```bash
+   rm -rf ~/EInkProject
+   ```
+4. Optionally remove InkyPi if you no longer need it:
+   ```bash
+   rm -rf ~/InkyPi
+   sudo rm -rf /usr/local/inkypi
+   ```
+5. Optionally remove the apt packages that were installed exclusively for this project:
+   ```bash
+   sudo apt-get remove --autoremove python3-venv python3-pip fonts-dejavu-core
+   ```
+   Skip this step if you use those packages for other things.
+
 ## Development
 
 If you want to rehearse the shell prompt flow on a development machine without touching system services, run:
