@@ -92,6 +92,7 @@ To remove everything the installer set up:
 2. Remove the sudoers file the installer created:
    ```bash
    sudo rm -f /etc/sudoers.d/photo-frame-inkypi
+   sudo rm -f /etc/sudoers.d/photo-frame-maintenance
    ```
 3. Delete the project directory (contains the app, config, database, and photos):
    ```bash

@@ -38,6 +38,9 @@ if git -C "${PROJECT_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; the
   fi
 fi
 
+service_user="${SUDO_USER:-$(id -un)}"
+ensure_photo_frame_maintenance_sudoers "${service_user}"
+
 inkypi_update_method="$(get_yaml_value inkypi.update_method string)"
 inkypi_update_now_url="$(get_yaml_value inkypi.update_now_url string)"
 refresh_command="$(get_yaml_value inkypi.refresh_command string)"

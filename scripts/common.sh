@@ -209,6 +209,43 @@ EOF
 }
 
 
+ensure_photo_frame_maintenance_sudoers() {
+  local service_user="$1"
+  local systemctl_bin journalctl_bin systemd_run_bin reboot_bin
+  systemctl_bin="$(command -v systemctl || true)"
+  journalctl_bin="$(command -v journalctl || true)"
+  systemd_run_bin="$(command -v systemd-run || true)"
+  reboot_bin="$(command -v reboot || true)"
+
+  if [[ -z "${systemctl_bin}" || -z "${journalctl_bin}" || -z "${systemd_run_bin}" || -z "${reboot_bin}" ]]; then
+    echo >&2 "Required maintenance commands were not found; cannot install photo-frame maintenance sudoers access."
+    return 1
+  fi
+
+  if [[ "${MOCK_INSTALL}" == "1" ]]; then
+    echo "[mock sudo] install maintenance sudoers access for ${service_user}"
+    return 0
+  fi
+
+  local tmp_file
+  tmp_file="$(mktemp)"
+  cat >"${tmp_file}" <<EOF
+# Managed by EInkProject installer
+${service_user} ALL=(root) NOPASSWD: ${systemd_run_bin}, ${reboot_bin}, ${systemctl_bin} restart photo-frame.service, ${systemctl_bin} is-active photo-frame.service, ${systemctl_bin} status photo-frame.service --no-pager, ${journalctl_bin} -u photo-frame.service -n 50 --no-pager
+EOF
+
+  chmod 440 "${tmp_file}"
+  run_privileged install -m 440 "${tmp_file}" /etc/sudoers.d/photo-frame-maintenance
+  rm -f "${tmp_file}"
+
+  local visudo_bin
+  visudo_bin="$(command -v visudo || true)"
+  if [[ -n "${visudo_bin}" ]]; then
+    run_privileged "${visudo_bin}" -cf /etc/sudoers.d/photo-frame-maintenance >/dev/null
+  fi
+}
+
+
 expand_path() {
   python3 - "$1" <<'PY'
 import os

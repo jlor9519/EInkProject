@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+from pathlib import Path
 
 from telegram import Update
 
 from app.auth import AuthService
 from app.bot import build_application
-from app.config import load_config
+from app.config import DEFAULT_CONFIG_PATH, load_config
 from app.database import Database
 from app.inkypi_adapter import InkyPiAdapter
 from app.logging_setup import configure_logging
@@ -31,6 +33,12 @@ def main() -> None:
     config = load_config(args.config)
     storage = StorageService(config.storage)
     storage.ensure_directories()
+    config_path = Path(
+        args.config
+        or os.getenv("PHOTO_FRAME_CONFIG")
+        or os.getenv("CONFIG_FILE")
+        or DEFAULT_CONFIG_PATH
+    ).expanduser()
 
     database = Database(config.database.path)
     database.initialize()
@@ -38,6 +46,7 @@ def main() -> None:
     database.seed_whitelist(config.security.whitelisted_user_ids)
 
     services = AppServices(
+        config_path=config_path,
         config=config,
         database=database,
         auth=AuthService(database),

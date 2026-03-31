@@ -10,7 +10,9 @@ from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 
 from app.auth import require_admin
-from app.commands import get_services
+from app.commands import _display_target, get_display_lock, get_services
+from app.database import utcnow_iso
+from app.orientation import format_orientation_label, normalize_orientation_value
 
 WAITING_FOR_SETTINGS_CHOICE, WAITING_FOR_SETTINGS_VALUE = range(10, 12)
 PENDING_SETTINGS_KEY = "pending_settings_choice"
@@ -110,9 +112,7 @@ _FIT_MODE_MAP = {
 
 def _get_current_value(settings: dict[str, Any], s: _SettingDef) -> str:
     if s.kind == "orientation":
-        orientation = str(settings.get("orientation", "?"))
-        inverted = str(settings.get("inverted_image", "?")).lower()
-        return f"{orientation} (inverted_image: {inverted})"
+        return format_orientation_label(str(settings.get("orientation", "?")))
     if s.kind == "fit_mode":
         raw = str(settings.get("image_fit_mode", "fill"))
         return _FIT_MODE_LABELS.get(raw, raw)
@@ -150,20 +150,56 @@ def _format_settings_list(settings: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _normalize_orientation_value(text: str) -> str | None:
-    normalized = " ".join(text.strip().lower().split())
-    mapping = {
-        "horizontal": "horizontal",
-        "landscape": "horizontal",
-        "waagerecht": "horizontal",
-        "querformat": "horizontal",
-        "vertical": "vertical",
-        "vertikal": "vertical",
-        "hochformat": "vertical",
-        "portrait": "vertical",
-        "porträt": "vertical",
-    }
-    return mapping.get(normalized)
+def _next_fire_delay_for_orientation(services, active_orientation: str) -> int | None:
+    rendered_count = services.database.count_rendered_images(active_orientation)
+    if rendered_count <= 0:
+        return None
+    from app.conversations import _cooldown_remaining, _get_cooldown_seconds
+
+    cooldown = _get_cooldown_seconds(services)
+    if cooldown <= 0:
+        return 1
+    remaining = _cooldown_remaining(services, cooldown)
+    return max(1, remaining) if remaining > 0 else 1
+
+
+async def _switch_orientation_library(context: ContextTypes.DEFAULT_TYPE, orientation: str) -> tuple[bool, str]:
+    services = get_services(context)
+    lock = get_display_lock(context)
+    async with lock:
+        target = services.database.get_newest_eligible_orientation_image(orientation)
+        if target is None:
+            return False, (
+                f"Es gibt noch keine Bilder für {format_orientation_label(orientation)}. "
+                "Das aktuell angezeigte Bild bleibt unverändert."
+            )
+
+        was_rendered = target.status == "rendered"
+        result = await _display_target(services, target)
+        if not result.success:
+            if was_rendered:
+                target.status = "display_failed"
+                target.last_error = result.message
+                services.database.upsert_image(target)
+            return False, f"Passendes Bild konnte nicht angezeigt werden: {result.message}"
+
+        if was_rendered:
+            target.status = "displayed"
+            target.last_error = None
+            services.database.upsert_image(target)
+            services.database.set_setting("last_new_image_displayed_at", utcnow_iso())
+
+        services.database.set_setting("current_image_displayed_at", utcnow_iso())
+
+        from app.slideshow import reschedule_slideshow_job
+
+        first_seconds = _next_fire_delay_for_orientation(services, orientation)
+        if first_seconds is None:
+            reschedule_slideshow_job(context.application)
+        else:
+            reschedule_slideshow_job(context.application, first_seconds=first_seconds)
+
+    return True, f"Zeige jetzt {format_orientation_label(orientation)}-Bild {target.image_id}."
 
 
 @require_admin
@@ -238,7 +274,7 @@ async def receive_settings_choice(update: Update, context: ContextTypes.DEFAULT_
     elif s.kind == "orientation":
         await update.effective_message.reply_text(
             f"Aktueller Wert für {s.label}: {current}\n"
-            "Gib den neuen Wert ein: horizontal oder vertical."
+            "Gib den neuen Wert ein: Hochformat oder Querformat."
         )
     elif s.kind == "fit_mode":
         await update.effective_message.reply_text(
@@ -303,10 +339,10 @@ async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
     if s.kind == "orientation":
-        orientation = _normalize_orientation_value(text)
+        orientation = normalize_orientation_value(text)
         if orientation is None:
             await update.effective_message.reply_text(
-                "Ungültiger Wert. Bitte gib horizontal oder vertical ein, oder nutze /cancel."
+                "Ungültiger Wert. Bitte gib Hochformat oder Querformat ein, oder nutze /cancel."
             )
             context.user_data[PENDING_SETTINGS_KEY] = idx
             return WAITING_FOR_SETTINGS_VALUE
@@ -314,7 +350,26 @@ async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_T
             "orientation": orientation,
             "inverted_image": orientation == "vertical",
         }
-        requested_value: str | float = orientation
+        try:
+            result = services.display.apply_device_settings(updates, refresh_current=False)
+        except Exception as exc:
+            logger.exception("Failed to write orientation settings")
+            await update.effective_message.reply_text(f"Fehler beim Speichern der Einstellungen: {exc}")
+            return ConversationHandler.END
+
+        orientation_label = format_orientation_label(orientation)
+        path_note = f" (device.json: {result.device_config_path})" if result.device_config_path else ""
+        if not result.success:
+            await update.effective_message.reply_text(
+                f"{s.label} wurde als {orientation_label} gespeichert{path_note}.\n{result.message}"
+            )
+            return ConversationHandler.END
+
+        switched, switch_message = await _switch_orientation_library(context, orientation)
+        await update.effective_message.reply_text(
+            f"{s.label} ist jetzt {orientation_label}{path_note}.\n{switch_message}\n{result.message}"
+        )
+        return ConversationHandler.END
     elif s.kind == "fit_mode":
         normalized = " ".join(text.split())
         fit_mode = _FIT_MODE_MAP.get(normalized)

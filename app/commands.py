@@ -13,6 +13,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from app.auth import require_admin, require_whitelist
 from app.database import utcnow_iso
 from app.models import AppServices, DisplayRequest, DisplayResult, ImageRecord
+from app.orientation import format_orientation_label, orientation_matches
 
 
 def get_services(context: ContextTypes.DEFAULT_TYPE) -> AppServices:
@@ -21,6 +22,10 @@ def get_services(context: ContextTypes.DEFAULT_TYPE) -> AppServices:
 
 def get_display_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
     return context.application.bot_data["display_lock"]
+
+
+def get_active_orientation(services: AppServices) -> str:
+    return services.display.current_orientation()
 
 
 @require_whitelist
@@ -40,10 +45,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "/prev - vorheriges Bild anzeigen",
                 "/list - nächste Bilder und Zeitplan anzeigen",
                 "/delete - aktuelles Bild löschen",
-                "/refresh - aktuelles Bild neu laden",
-                "/settings - Anzeigeeinstellungen anzeigen/ändern (nur Admins)",
-                "/users - freigegebene Nutzer anzeigen (nur Admins)",
-                "/unwhitelist - Nutzer entfernen (nur Admins)",
+                # "/refresh - aktuelles Bild neu laden",
+                # "/settings - Anzeigeeinstellungen anzeigen/ändern (nur Admins)",
+                # "/users - freigegebene Nutzer anzeigen (nur Admins)",
+                # "/unwhitelist - Nutzer entfernen (nur Admins)",
+                "/restart - Raspberry Pi neu starten (nur Admins)",
+                "/update - Projekt aktualisieren (nur Admins)",
                 "/status - Systemstatus anzeigen",
                 "/myid - deine Telegram-Nutzer-ID anzeigen",
                 "/cancel - den laufenden Upload abbrechen",
@@ -82,6 +89,7 @@ def _format_duration(since_iso: str | None) -> str:
 @require_whitelist
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     services = get_services(context)
+    active_orientation = get_active_orientation(services)
 
     db_ok = services.database.healthcheck()
     storage_ok = services.storage.healthcheck()
@@ -95,12 +103,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         inkypi_line = "✗ nicht erreichbar"
 
-    image_count = services.database.count_displayed_images()
-    rendered_count = services.database.count_rendered_images()
+    image_count = services.database.count_displayed_images(active_orientation)
+    rendered_count = services.database.count_rendered_images(active_orientation)
     displayed_at = services.database.get_setting("current_image_displayed_at")
     user_count = services.database.count_whitelisted_users()
 
     image_lines = [
+        f"- Bibliothek: {format_orientation_label(active_orientation)}",
         f"- In Rotation: {image_count} {'Bild' if image_count == 1 else 'Bilder'}",
         f"- Aktuelles Bild: {_format_duration(displayed_at)}",
     ]
@@ -201,6 +210,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if message is None:
         return
     services = get_services(context)
+    active_orientation = get_active_orientation(services)
 
     payload_path = services.config.storage.current_payload_path
     if not payload_path.exists():
@@ -218,9 +228,9 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await message.reply_text("Kein aktuelles Bild erkannt.")
         return
 
-    next_images = services.database.get_next_images(current_image_id, 5)
-    total = services.database.count_displayed_images()
-    current_pos = services.database.get_displayed_image_position(current_image_id)
+    next_images = services.database.get_next_images(current_image_id, 5, active_orientation)
+    total = services.database.count_displayed_images(active_orientation)
+    current_pos = services.database.get_displayed_image_position(current_image_id, active_orientation)
 
     def _image_label(record: ImageRecord) -> str:
         parts = []
@@ -232,11 +242,14 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             parts.append(record.taken_at)
         return " • ".join(parts) if parts else "(kein Text)"
 
-    lines = [f"Bilderliste ({total} gesamt)", ""]
+    lines = [f"Bilderliste {format_orientation_label(active_orientation)} ({total} gesamt)", ""]
 
     current_record = services.database.get_image_by_id(current_image_id)
     current_label = _image_label(current_record) if current_record else "(unbekannt)"
-    lines.append(f"{current_label}")
+    if current_record and not orientation_matches(current_record.orientation_bucket, active_orientation):
+        lines.append(f"{current_label} (aktuell angezeigt, nicht Teil der aktuellen Bibliothek)")
+    else:
+        lines.append(f"{current_label}")
 
     interval = await asyncio.to_thread(services.display.get_slideshow_interval)
 
@@ -260,7 +273,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     lines.append(f"  Wechsel in ca. {remaining_str}")
 
     # Show pending new images (rendered, waiting for cooldown)
-    rendered_count = services.database.count_rendered_images()
+    rendered_count = services.database.count_rendered_images(active_orientation)
     if rendered_count > 0:
         from app.conversations import _get_cooldown_seconds, _cooldown_remaining
         cooldown = _get_cooldown_seconds(services)
@@ -339,6 +352,7 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
     message = update.effective_message
     if message is None:
         return
+    active_orientation = get_active_orientation(services)
 
     payload_path = services.config.storage.current_payload_path
     if not payload_path.exists():
@@ -356,15 +370,15 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
         await message.reply_text("Kein aktuelles Bild erkannt.")
         return
 
-    target = services.database.get_adjacent_image(current_image_id, direction)
+    target = services.database.get_adjacent_image(current_image_id, direction, active_orientation)
     if target is None:
         await message.reply_text("Kein weiteres Bild vorhanden.")
         return
 
     result = await _display_target(services, target)
 
-    total = services.database.count_displayed_images()
-    position = services.database.get_displayed_image_position(target.image_id)
+    total = services.database.count_displayed_images(active_orientation)
+    position = services.database.get_displayed_image_position(target.image_id, active_orientation)
     if result.success:
         services.database.set_setting("current_image_displayed_at", utcnow_iso())
         await message.reply_text(f"Bild {position} von {total}: {target.image_id}")
@@ -450,13 +464,14 @@ async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
     async with lock:
         image_id = query.data.split(":", 1)[1] if ":" in query.data else ""
         services = get_services(context)
+        active_orientation = get_active_orientation(services)
 
         record = services.database.get_image_by_id(image_id)
 
         # Find replacement before deleting
-        replacement = services.database.get_adjacent_image(image_id, "next")
+        replacement = services.database.get_adjacent_image(image_id, "next", active_orientation)
         if replacement is None:
-            replacement = services.database.get_adjacent_image(image_id, "prev")
+            replacement = services.database.get_adjacent_image(image_id, "prev", active_orientation)
 
         if replacement is None:
             await _edit_query_message(
@@ -478,7 +493,7 @@ async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
 
         result = await _display_target(services, replacement)
 
-        total = services.database.count_displayed_images()
+        total = services.database.count_displayed_images(active_orientation)
         if result.success:
             services.database.set_setting("current_image_displayed_at", utcnow_iso())
             await _edit_query_message(

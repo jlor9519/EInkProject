@@ -26,6 +26,22 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(result, WAITING_FOR_TEXT_CHOICE)
             self.assertEqual(context.user_data[PENDING_SUBMISSION_KEY]["caption"], "Schon im Foto")
+            self.assertEqual(context.user_data[PENDING_SUBMISSION_KEY]["orientation_bucket"], "horizontal")
+
+    async def test_new_upload_is_tagged_with_active_orientation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            display = _FakeDisplay(orientation="vertical")
+            services = _build_services(tmpdir_path, display=display)
+            application = _FakeApplication(services)
+            update = _FakeUpdate(user_id=1, chat_id=101, photo_token="one")
+            context = _FakeContext(application)
+
+            await photo_entry(update, context)
+            await _submit_photo(update, context, show_caption=False)
+
+            record = services.database.get_image_by_id("img-1")
+            self.assertEqual(record.orientation_bucket, "vertical")
 
     async def test_photo_entry_and_submit_queue_multiple_users_fifo(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -88,6 +104,7 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
                     created_at="2026-03-18T12:00:00+00:00",
                     status="queued",
                     last_error=None,
+                    orientation_bucket="horizontal",
                 )
             )
 
@@ -95,7 +112,7 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
 
             record = services.database.get_image_by_id("img-1")
             self.assertEqual(record.status, "displayed_with_warnings")
-            self.assertEqual(services.database.count_displayed_images(), 1)
+            self.assertEqual(services.database.count_displayed_images("horizontal"), 1)
             self.assertIn("Telegram-Benachrichtigung fehlgeschlagen", record.last_error)
 
     async def test_process_queued_upload_waits_for_display_lock(self) -> None:
@@ -122,6 +139,7 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
                     created_at="2026-03-18T12:00:00+00:00",
                     status="queued",
                     last_error=None,
+                    orientation_bucket="horizontal",
                 )
             )
 
@@ -171,11 +189,12 @@ class _FakeRenderer:
 
 
 class _FakeDisplay:
-    def __init__(self) -> None:
+    def __init__(self, *, orientation: str = "horizontal") -> None:
         self.calls = 0
+        self.orientation = orientation
 
     def current_orientation(self) -> str:
-        return "horizontal"
+        return self.orientation
 
     def display(self, request) -> DisplayResult:
         self.calls += 1

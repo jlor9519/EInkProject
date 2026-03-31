@@ -8,7 +8,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from app.models import ImageRecord
+from app.models import ImageRecord, MaintenanceJobRecord
+from app.orientation import ACTIVE_ORIENTATIONS, ORIENTATION_SHARED, orientation_pool
 
 
 def utcnow_iso() -> str:
@@ -53,7 +54,8 @@ class Database:
                     uploaded_by INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    last_error TEXT
+                    last_error TEXT,
+                    orientation_bucket TEXT NOT NULL DEFAULT 'shared'
                 );
 
                 CREATE TABLE IF NOT EXISTS settings (
@@ -61,7 +63,24 @@ class Database:
                     value TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS maintenance_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    requested_by_user_id INTEGER NOT NULL,
+                    telegram_chat_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    unit_name TEXT,
+                    log_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    notified_at TEXT,
+                    last_error TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_images_orientation ON images(orientation_bucket);
+                CREATE INDEX IF NOT EXISTS idx_maintenance_jobs_status ON maintenance_jobs(status, created_at DESC);
                 """
             )
             columns = {
@@ -72,6 +91,14 @@ class Database:
                 self._connection.execute(
                     "ALTER TABLE images ADD COLUMN telegram_chat_id INTEGER"
                 )
+            if "orientation_bucket" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE images ADD COLUMN orientation_bucket TEXT NOT NULL DEFAULT 'shared'"
+                )
+            self._connection.execute(
+                "UPDATE images SET orientation_bucket = ? WHERE orientation_bucket IS NULL OR orientation_bucket = ''",
+                (ORIENTATION_SHARED,),
+            )
             self._connection.commit()
         logger.info("Database initialized at %s", self.db_path)
 
@@ -173,8 +200,9 @@ class Database:
                     uploaded_by,
                     created_at,
                     status,
-                    last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_error,
+                    orientation_bucket
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(image_id) DO UPDATE SET
                     telegram_file_id = excluded.telegram_file_id,
                     telegram_chat_id = excluded.telegram_chat_id,
@@ -186,7 +214,8 @@ class Database:
                     uploaded_by = excluded.uploaded_by,
                     created_at = excluded.created_at,
                     status = excluded.status,
-                    last_error = excluded.last_error
+                    last_error = excluded.last_error,
+                    orientation_bucket = excluded.orientation_bucket
                 """,
                 (
                     record.image_id,
@@ -201,6 +230,7 @@ class Database:
                     record.created_at,
                     record.status,
                     record.last_error,
+                    record.orientation_bucket,
                 ),
             )
             self._connection.commit()
@@ -213,6 +243,111 @@ class Database:
             if row is None:
                 return None
             return self._row_to_image(row)
+
+    def create_maintenance_job(
+        self,
+        *,
+        job_id: str,
+        kind: str,
+        requested_by_user_id: int,
+        telegram_chat_id: int,
+        log_path: str,
+        unit_name: str | None = None,
+        status: str = "queued",
+    ) -> MaintenanceJobRecord:
+        created_at = utcnow_iso()
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO maintenance_jobs (
+                    job_id,
+                    kind,
+                    requested_by_user_id,
+                    telegram_chat_id,
+                    status,
+                    unit_name,
+                    log_path,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (job_id, kind, requested_by_user_id, telegram_chat_id, status, unit_name, log_path, created_at),
+            )
+            self._connection.commit()
+        return self.get_maintenance_job(job_id)
+
+    def get_maintenance_job(self, job_id: str) -> MaintenanceJobRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM maintenance_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_maintenance_job(row)
+
+    def get_active_maintenance_job(self) -> MaintenanceJobRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT * FROM maintenance_jobs
+                WHERE status IN ('queued', 'running', 'rebooting')
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_maintenance_job(row)
+
+    def mark_maintenance_job_running(self, job_id: str) -> None:
+        self._set_maintenance_job_status(job_id, "running", started_at=utcnow_iso())
+
+    def mark_maintenance_job_rebooting(self, job_id: str) -> None:
+        self._set_maintenance_job_status(job_id, "rebooting")
+
+    def mark_maintenance_job_finished(self, job_id: str, *, status: str, last_error: str | None = None) -> None:
+        self._set_maintenance_job_status(job_id, status, finished_at=utcnow_iso(), last_error=last_error)
+
+    def complete_rebooting_maintenance_jobs(self) -> list[MaintenanceJobRecord]:
+        finished_at = utcnow_iso()
+        with self._lock:
+            self._connection.execute(
+                """
+                UPDATE maintenance_jobs
+                SET status = 'succeeded',
+                    finished_at = COALESCE(finished_at, ?)
+                WHERE status = 'rebooting'
+                """,
+                (finished_at,),
+            )
+            self._connection.commit()
+            rows = self._connection.execute(
+                """
+                SELECT * FROM maintenance_jobs
+                WHERE status = 'succeeded' AND notified_at IS NULL AND kind = 'restart'
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+            return [self._row_to_maintenance_job(row) for row in rows]
+
+    def get_unnotified_finished_maintenance_jobs(self) -> list[MaintenanceJobRecord]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM maintenance_jobs
+                WHERE status IN ('succeeded', 'failed') AND notified_at IS NULL
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+            return [self._row_to_maintenance_job(row) for row in rows]
+
+    def mark_maintenance_job_notified(self, job_id: str) -> None:
+        with self._lock:
+            self._connection.execute(
+                "UPDATE maintenance_jobs SET notified_at = ? WHERE job_id = ?",
+                (utcnow_iso(), job_id),
+            )
+            self._connection.commit()
 
     def delete_image(self, image_id: str) -> bool:
         with self._lock:
@@ -233,7 +368,7 @@ class Database:
 
     _DISPLAYED_STATUSES = ("displayed", "displayed_with_warnings")
 
-    def get_adjacent_image(self, current_image_id: str, direction: str) -> ImageRecord | None:
+    def get_adjacent_image(self, current_image_id: str, direction: str, active_orientation: str | None = None) -> ImageRecord | None:
         with self._lock:
             current = self._connection.execute(
                 "SELECT created_at FROM images WHERE image_id = ?", (current_image_id,)
@@ -241,49 +376,62 @@ class Database:
             if current is None:
                 return None
             current_created_at = current["created_at"]
+            orientation_args = self._orientation_args(active_orientation)
+            orientation_sql = self._orientation_filter_sql(active_orientation)
 
             if direction == "next":
                 row = self._connection.execute(
-                    "SELECT * FROM images WHERE created_at > ? AND status IN (?, ?) ORDER BY created_at ASC LIMIT 1",
-                    (current_created_at, *self._DISPLAYED_STATUSES),
+                    f"SELECT * FROM images WHERE created_at > ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC LIMIT 1",
+                    (current_created_at, *self._DISPLAYED_STATUSES, *orientation_args),
                 ).fetchone()
                 if row is None:
                     row = self._connection.execute(
-                        "SELECT * FROM images WHERE image_id != ? AND status IN (?, ?) ORDER BY created_at ASC LIMIT 1",
-                        (current_image_id, *self._DISPLAYED_STATUSES),
+                        f"SELECT * FROM images WHERE image_id != ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC LIMIT 1",
+                        (current_image_id, *self._DISPLAYED_STATUSES, *orientation_args),
                     ).fetchone()
             else:
                 row = self._connection.execute(
-                    "SELECT * FROM images WHERE created_at < ? AND status IN (?, ?) ORDER BY created_at DESC LIMIT 1",
-                    (current_created_at, *self._DISPLAYED_STATUSES),
+                    f"SELECT * FROM images WHERE created_at < ? AND status IN (?, ?){orientation_sql} ORDER BY created_at DESC LIMIT 1",
+                    (current_created_at, *self._DISPLAYED_STATUSES, *orientation_args),
                 ).fetchone()
                 if row is None:
                     row = self._connection.execute(
-                        "SELECT * FROM images WHERE image_id != ? AND status IN (?, ?) ORDER BY created_at DESC LIMIT 1",
-                        (current_image_id, *self._DISPLAYED_STATUSES),
+                        f"SELECT * FROM images WHERE image_id != ? AND status IN (?, ?){orientation_sql} ORDER BY created_at DESC LIMIT 1",
+                        (current_image_id, *self._DISPLAYED_STATUSES, *orientation_args),
                     ).fetchone()
 
             if row is None:
                 return None
             return self._row_to_image(row)
 
-    def count_displayed_images(self) -> int:
+    def count_displayed_images(self, active_orientation: str | None = None) -> int:
         with self._lock:
+            orientation_args = self._orientation_args(active_orientation)
             row = self._connection.execute(
-                "SELECT COUNT(*) AS count FROM images WHERE status IN (?, ?)",
-                self._DISPLAYED_STATUSES,
+                f"SELECT COUNT(*) AS count FROM images WHERE status IN (?, ?){self._orientation_filter_sql(active_orientation)}",
+                (*self._DISPLAYED_STATUSES, *orientation_args),
             ).fetchone()
             return int(row["count"] if row else 0)
 
-    def get_displayed_image_position(self, image_id: str) -> int:
+    def get_displayed_image_position(self, image_id: str, active_orientation: str | None = None) -> int:
         with self._lock:
+            current = self._connection.execute(
+                "SELECT created_at, orientation_bucket FROM images WHERE image_id = ?",
+                (image_id,),
+            ).fetchone()
+            if current is None:
+                return 0
+            if active_orientation in ACTIVE_ORIENTATIONS and current["orientation_bucket"] not in orientation_pool(active_orientation):
+                return 0
+            orientation_args = self._orientation_args(active_orientation)
             row = self._connection.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS pos FROM images
-                WHERE created_at <= (SELECT created_at FROM images WHERE image_id = ?)
+                WHERE created_at <= ?
                 AND status IN (?, ?)
+                {self._orientation_filter_sql(active_orientation)}
                 """,
-                (image_id, *self._DISPLAYED_STATUSES),
+                (current["created_at"], *self._DISPLAYED_STATUSES, *orientation_args),
             ).fetchone()
             return int(row["pos"] if row else 0)
 
@@ -301,7 +449,47 @@ class Database:
             created_at=row["created_at"],
             status=row["status"],
             last_error=row["last_error"],
+            orientation_bucket=row["orientation_bucket"] or ORIENTATION_SHARED,
         )
+
+    def _row_to_maintenance_job(self, row: sqlite3.Row) -> MaintenanceJobRecord:
+        return MaintenanceJobRecord(
+            job_id=row["job_id"],
+            kind=row["kind"],
+            requested_by_user_id=row["requested_by_user_id"],
+            telegram_chat_id=row["telegram_chat_id"],
+            status=row["status"],
+            unit_name=row["unit_name"],
+            log_path=row["log_path"],
+            created_at=row["created_at"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            notified_at=row["notified_at"],
+            last_error=row["last_error"],
+        )
+
+    def _set_maintenance_job_status(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._connection.execute(
+                """
+                UPDATE maintenance_jobs
+                SET status = ?,
+                    started_at = COALESCE(?, started_at),
+                    finished_at = COALESCE(?, finished_at),
+                    last_error = ?
+                WHERE job_id = ?
+                """,
+                (status, started_at, finished_at, last_error, job_id),
+            )
+            self._connection.commit()
 
     def reconcile_pending_images(self) -> list[ImageRecord]:
         with self._lock:
@@ -324,15 +512,29 @@ class Database:
                 return None
             return self._row_to_image(row)
 
-    def count_rendered_images(self) -> int:
+    def get_oldest_rendered_image_for_orientation(self, active_orientation: str | None = None) -> ImageRecord | None:
+        """Return the oldest rendered image visible in the active orientation pool."""
+        with self._lock:
+            orientation_args = self._orientation_args(active_orientation)
+            row = self._connection.execute(
+                f"SELECT * FROM images WHERE status = 'rendered'{self._orientation_filter_sql(active_orientation)} ORDER BY created_at ASC LIMIT 1",
+                orientation_args,
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_image(row)
+
+    def count_rendered_images(self, active_orientation: str | None = None) -> int:
         """Count images with status 'rendered' (queued for display after cooldown)."""
         with self._lock:
+            orientation_args = self._orientation_args(active_orientation)
             row = self._connection.execute(
-                "SELECT COUNT(*) AS count FROM images WHERE status = 'rendered'"
+                f"SELECT COUNT(*) AS count FROM images WHERE status = 'rendered'{self._orientation_filter_sql(active_orientation)}",
+                orientation_args,
             ).fetchone()
             return int(row["count"] if row else 0)
 
-    def get_next_images(self, current_image_id: str, n: int) -> list[ImageRecord]:
+    def get_next_images(self, current_image_id: str, n: int, active_orientation: str | None = None) -> list[ImageRecord]:
         """Get the next N displayed images after current_image_id, wrapping around."""
         with self._lock:
             current = self._connection.execute(
@@ -341,22 +543,41 @@ class Database:
             if current is None:
                 return []
             current_created_at = current["created_at"]
+            orientation_args = self._orientation_args(active_orientation)
+            orientation_sql = self._orientation_filter_sql(active_orientation)
 
             rows = self._connection.execute(
-                "SELECT * FROM images WHERE created_at > ? AND status IN (?, ?) ORDER BY created_at ASC LIMIT ?",
-                (current_created_at, *self._DISPLAYED_STATUSES, n),
+                f"SELECT * FROM images WHERE created_at > ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC LIMIT ?",
+                (current_created_at, *self._DISPLAYED_STATUSES, *orientation_args, n),
             ).fetchall()
             results = [self._row_to_image(r) for r in rows]
 
             if len(results) < n:
                 remaining = n - len(results)
                 wrap_rows = self._connection.execute(
-                    "SELECT * FROM images WHERE created_at <= ? AND image_id != ? AND status IN (?, ?) ORDER BY created_at ASC LIMIT ?",
-                    (current_created_at, current_image_id, *self._DISPLAYED_STATUSES, remaining),
+                    f"SELECT * FROM images WHERE created_at <= ? AND image_id != ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC LIMIT ?",
+                    (current_created_at, current_image_id, *self._DISPLAYED_STATUSES, *orientation_args, remaining),
                 ).fetchall()
                 results.extend(self._row_to_image(r) for r in wrap_rows)
 
             return results
+
+    def get_newest_eligible_orientation_image(self, active_orientation: str) -> ImageRecord | None:
+        with self._lock:
+            orientation_args = self._orientation_args(active_orientation)
+            row = self._connection.execute(
+                f"""
+                SELECT * FROM images
+                WHERE status IN (?, ?, ?)
+                {self._orientation_filter_sql(active_orientation)}
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                ("rendered", *self._DISPLAYED_STATUSES, *orientation_args),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_image(row)
 
     def get_whitelisted_users(self) -> list[dict]:
         """Return all whitelisted users ordered by created_at."""
@@ -394,3 +615,15 @@ class Database:
                 (key, value),
             )
             self._connection.commit()
+
+    @staticmethod
+    def _orientation_args(active_orientation: str | None) -> tuple[str, ...]:
+        if active_orientation not in ACTIVE_ORIENTATIONS:
+            return ()
+        return orientation_pool(active_orientation)
+
+    @staticmethod
+    def _orientation_filter_sql(active_orientation: str | None) -> str:
+        if active_orientation not in ACTIVE_ORIENTATIONS:
+            return ""
+        return " AND orientation_bucket IN (?, ?)"

@@ -73,6 +73,22 @@ class AppConfig:
 
 
 @dataclass(slots=True)
+class MaintenanceJobRecord:
+    job_id: str
+    kind: str
+    requested_by_user_id: int
+    telegram_chat_id: int
+    status: str
+    unit_name: str | None
+    log_path: str
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    notified_at: str | None = None
+    last_error: str | None = None
+
+
+@dataclass(slots=True)
 class ImageRecord:
     image_id: str
     telegram_file_id: str
@@ -86,6 +102,7 @@ class ImageRecord:
     created_at: str
     status: str
     last_error: str | None = None
+    orientation_bucket: str = "shared"
 
 
 @dataclass(slots=True)
@@ -136,6 +153,7 @@ class DeviceSettingsApplyResult:
 
 @dataclass(slots=True)
 class AppServices:
+    config_path: Path | None
     config: AppConfig
     database: Any
     auth: Any

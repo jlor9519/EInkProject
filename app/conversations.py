@@ -25,6 +25,7 @@ from app.auth import require_whitelist
 from app.commands import get_display_lock, get_services
 from app.database import utcnow_iso
 from app.models import DisplayRequest, ImageRecord
+from app.orientation import format_orientation_label, orientation_matches
 
 (
     WAITING_FOR_TEXT_CHOICE,
@@ -116,6 +117,7 @@ async def photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         "telegram_file_id": photo.file_id,
         "original_path": str(original_path),
         "caption": (message.caption or "").strip(),
+        "orientation_bucket": services.display.current_orientation(),
     }
 
     keyboard = InlineKeyboardMarkup([
@@ -239,7 +241,7 @@ async def _show_preview(message, context: ContextTypes.DEFAULT_TYPE) -> int:
     if original_path.exists():
         services = get_services(context)
         try:
-            orientation = services.display.current_orientation()
+            orientation = pending.get("orientation_bucket") or services.display.current_orientation()
             fit_mode = services.database.get_setting("image_fit_mode") or "fill"
             preview_buf = await asyncio.to_thread(
                 services.renderer.compose_preview,
@@ -411,6 +413,7 @@ async def _submit_photo(
         created_at=utcnow_iso(),
         status="queued",
         last_error=None,
+        orientation_bucket=str(pending.get("orientation_bucket") or "shared"),
     )
     try:
         services.database.upsert_image(record)
@@ -551,15 +554,29 @@ async def process_queued_upload(application: Application, image_id: str) -> None
         # from both passing the check and displaying at the same time
         lock = application.bot_data["display_lock"]
         async with lock:
+            active_orientation = services.display.current_orientation()
             cooldown = _get_cooldown_seconds(services)
             remaining = _cooldown_remaining(services, cooldown)
+
+            if not orientation_matches(record.orientation_bucket, active_orientation):
+                record.status = "rendered"
+                services.database.upsert_image(record)
+                record = await _notify_completion(
+                    application,
+                    record,
+                    f"Dein Foto wurde gerendert und wartet darauf, dass der Rahmen wieder im "
+                    f"{format_orientation_label(record.orientation_bucket)} ist.\n"
+                    f"Bild-ID: {record.image_id}",
+                )
+                services.database.upsert_image(record)
+                return
 
             if remaining > 0:
                 # Cooldown active — park as "rendered" and notify user with ETA
                 record.status = "rendered"
                 services.database.upsert_image(record)
 
-                pending_count = services.database.count_rendered_images()
+                pending_count = services.database.count_rendered_images(active_orientation)
                 from app.settings_conversation import _format_interval_label
                 eta_seconds = remaining + (pending_count - 1) * cooldown
                 eta_label = _format_interval_label(eta_seconds)

@@ -27,10 +27,11 @@ def schedule_slideshow_job(application: Application) -> None:
         logger.warning("JobQueue not available — auto-advance disabled. Install: pip install 'python-telegram-bot[job-queue]'")
         return
     services = application.bot_data["services"]
+    active_orientation = services.display.current_orientation()
     interval = services.display.get_slideshow_interval()
 
     # If rendered images are waiting, fire sooner based on cooldown
-    rendered_count = services.database.count_rendered_images()
+    rendered_count = services.database.count_rendered_images(active_orientation)
     if rendered_count > 0:
         cooldown = _get_cooldown_seconds(services)
         remaining = _cooldown_remaining(services, cooldown)
@@ -119,7 +120,8 @@ def _is_in_sleep_window(schedule: tuple[str, str]) -> bool:
 
 async def _try_display_next_rendered(context, services, lock) -> bool:
     """Try to display the next rendered (cooldown-queued) image. Returns True if displayed."""
-    rendered = services.database.get_oldest_rendered_image()
+    active_orientation = services.display.current_orientation()
+    rendered = services.database.get_oldest_rendered_image_for_orientation(active_orientation)
     if rendered is None:
         return False
 
@@ -156,7 +158,7 @@ async def _try_display_next_rendered(context, services, lock) -> bool:
         logger.info("Displayed rendered image %s from cooldown queue", rendered.image_id)
 
         # If more rendered images are waiting, use cooldown as next interval
-        more = services.database.count_rendered_images()
+        more = services.database.count_rendered_images(active_orientation)
         next_interval = cooldown if (more > 0 and cooldown > 0) else services.display.get_slideshow_interval()
         _reschedule_for(context.application, next_interval)
     else:
@@ -193,6 +195,7 @@ async def _advance_slideshow(context) -> None:
     logger.debug("Slideshow auto-advance job triggered")
     services = context.application.bot_data["services"]
     lock = context.application.bot_data["display_lock"]
+    active_orientation = services.display.current_orientation()
 
     # Check sleep schedule
     schedule = services.display.get_sleep_schedule()
@@ -227,7 +230,7 @@ async def _advance_slideshow(context) -> None:
         if not current_image_id:
             return
 
-        target = services.database.get_adjacent_image(current_image_id, "next")
+        target = services.database.get_adjacent_image(current_image_id, "next", active_orientation)
         if target is None:
             logger.debug("Auto-advance: no next image (only 1 in rotation?)")
             return

@@ -64,6 +64,7 @@ bash "${PROJECT_ROOT}/scripts/setup_inkypi.sh"
 
 echo "Installing/updating photo-frame systemd service for user ${service_user}."
 ensure_service_unit "${service_user}" "${service_workdir}"
+ensure_photo_frame_maintenance_sudoers "${service_user}"
 run_privileged systemctl restart photo-frame.service
 ensure_systemd_service_active photo-frame.service
 

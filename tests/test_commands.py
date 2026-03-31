@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.commands import delete_cancel_callback, delete_confirm_callback
+from app.commands import delete_cancel_callback, delete_confirm_callback, list_command, status_command
 from app.database import Database
 from app.models import DisplayResult, ImageRecord
 
@@ -59,6 +59,100 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update.callback_query.caption_edits, ["Löschen abgebrochen."])
         self.assertEqual(update.callback_query.text_edits, [])
 
+    async def test_status_and_list_use_active_orientation_library(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.database.set_setting("slideshow_next_fire_at", "2099-01-01T00:00:00+00:00")
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-shared",
+                    telegram_file_id="file-shared",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-shared.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Shared",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="shared",
+                )
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-vertical",
+                    telegram_file_id="file-vertical",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-vertical.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Vertical",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:10:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="vertical",
+                )
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-horizontal",
+                    telegram_file_id="file-horizontal",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-horizontal.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Horizontal",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:20:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-vertical-rendered",
+                    telegram_file_id="file-rendered",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-vertical-rendered.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Rendered",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:30:00+00:00",
+                    status="rendered",
+                    last_error=None,
+                    orientation_bucket="vertical",
+                )
+            )
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-horizontal"}),
+                encoding="utf-8",
+            )
+            services.display.orientation = "vertical"
+
+            update_status = _MessageUpdate()
+            update_list = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await status_command(update_status, context)
+            await list_command(update_list, context)
+
+            self.assertIn("Bibliothek: Hochformat", update_status.effective_message.replies[0])
+            self.assertIn("In Rotation: 2 Bilder", update_status.effective_message.replies[0])
+            self.assertIn("Warteschlange: 1 neues Bild wartend", update_status.effective_message.replies[0])
+            self.assertIn("Bilderliste Hochformat (2 gesamt)", update_list.effective_message.replies[0])
+            self.assertIn("Horizontal", update_list.effective_message.replies[0])
+            self.assertIn("nicht Teil der aktuellen Bibliothek", update_list.effective_message.replies[0])
+
 
 class _FakeQueryMessage:
     def __init__(self, *, has_media: bool) -> None:
@@ -90,23 +184,68 @@ class _FakeUpdate:
         self.callback_query = _FakeCallbackQuery(data=data, has_media=has_media)
 
 
+class _FakeMessageOnly:
+    def __init__(self) -> None:
+        self.replies: list[str] = []
+
+    async def reply_text(self, text: str) -> None:
+        self.replies.append(text)
+
+
+class _MessageUpdate:
+    def __init__(self) -> None:
+        self.effective_message = _FakeMessageOnly()
+        self.effective_user = SimpleNamespace(id=1)
+
+
 class _FakeContext:
     def __init__(self, services) -> None:
         self.application = SimpleNamespace(bot_data={"services": services, "display_lock": asyncio.Lock()})
+        self.user_data: dict[str, object] = {}
 
 
 class _FakeDisplay:
+    def __init__(self) -> None:
+        self.orientation = "horizontal"
+
+    def current_orientation(self) -> str:
+        return self.orientation
+
     def display(self, request) -> DisplayResult:
         return DisplayResult(True, f"displayed {request.image_id}")
+
+    def payload_exists(self) -> bool:
+        return True
+
+    def ping_inkypi(self):
+        return None
+
+    def get_slideshow_interval(self) -> int:
+        return 86400
+
+    def get_sleep_schedule(self):
+        return None
+
+
+class _FakeAuth:
+    def sync_user(self, user) -> None:
+        return None
+
+    def is_whitelisted(self, user_id: int) -> bool:
+        return True
 
 
 def _build_services(base_dir: Path):
     database = Database(base_dir / "photo_frame.db")
     database.initialize()
     return SimpleNamespace(
+        auth=_FakeAuth(),
         database=database,
         display=_FakeDisplay(),
-        storage=SimpleNamespace(rendered_path=lambda image_id: base_dir / "rendered" / f"{image_id}.png"),
+        storage=SimpleNamespace(
+            rendered_path=lambda image_id: base_dir / "rendered" / f"{image_id}.png",
+            healthcheck=lambda: True,
+        ),
         renderer=SimpleNamespace(render=lambda *args, **kwargs: None),
         config=SimpleNamespace(
             storage=SimpleNamespace(
