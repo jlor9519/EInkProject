@@ -406,6 +406,40 @@ class Database:
                 return None
             return self._row_to_image(row)
 
+    def get_next_navigation_target(self, current_image_id: str, active_orientation: str | None = None) -> ImageRecord | None:
+        """Return the manual /next target, prioritizing rendered queue items."""
+        with self._lock:
+            orientation_args = self._orientation_args(active_orientation)
+            orientation_sql = self._orientation_filter_sql(active_orientation)
+
+            row = self._connection.execute(
+                f"SELECT * FROM images WHERE status = 'rendered'{orientation_sql} ORDER BY created_at ASC LIMIT 1",
+                orientation_args,
+            ).fetchone()
+            if row is not None:
+                return self._row_to_image(row)
+
+            current = self._connection.execute(
+                "SELECT created_at FROM images WHERE image_id = ?",
+                (current_image_id,),
+            ).fetchone()
+            if current is None:
+                return None
+            current_created_at = current["created_at"]
+
+            row = self._connection.execute(
+                f"SELECT * FROM images WHERE created_at > ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC LIMIT 1",
+                (current_created_at, *self._DISPLAYED_STATUSES, *orientation_args),
+            ).fetchone()
+            if row is None:
+                row = self._connection.execute(
+                    f"SELECT * FROM images WHERE image_id != ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC LIMIT 1",
+                    (current_image_id, *self._DISPLAYED_STATUSES, *orientation_args),
+                ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_image(row)
+
     def count_displayed_images(self, active_orientation: str | None = None) -> int:
         with self._lock:
             orientation_args = self._orientation_args(active_orientation)
@@ -580,6 +614,19 @@ class Database:
             if row is None:
                 return None
             return self._row_to_image(row)
+
+    def get_images_excluding(self, image_id: str | None) -> list[ImageRecord]:
+        with self._lock:
+            if image_id:
+                rows = self._connection.execute(
+                    "SELECT * FROM images WHERE image_id != ? ORDER BY created_at ASC",
+                    (image_id,),
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    "SELECT * FROM images ORDER BY created_at ASC"
+                ).fetchall()
+            return [self._row_to_image(row) for row in rows]
 
     def get_whitelisted_users(self) -> list[dict]:
         """Return all whitelisted users ordered by created_at."""

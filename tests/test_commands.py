@@ -7,7 +7,14 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.commands import delete_cancel_callback, delete_confirm_callback, list_command, status_command
+from app.commands import (
+    delete_cancel_callback,
+    delete_confirm_callback,
+    list_command,
+    next_command,
+    prev_command,
+    status_command,
+)
 from app.database import Database
 from app.models import DisplayResult, ImageRecord
 
@@ -153,6 +160,139 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Horizontal", update_list.effective_message.replies[0])
             self.assertIn("nicht Teil der aktuellen Bibliothek", update_list.effective_message.replies[0])
 
+    async def test_next_promotes_oldest_rendered_image_before_displayed_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.display.orientation = "horizontal"
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-current"}),
+                encoding="utf-8",
+            )
+            for image_id in ("img-current", "img-next"):
+                original = tmpdir_path / "incoming" / f"{image_id}.jpg"
+                original.parent.mkdir(parents=True, exist_ok=True)
+                original.write_bytes(image_id.encode("utf-8"))
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-current",
+                    telegram_file_id="file-current",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-current.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Current",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-next",
+                    telegram_file_id="file-next",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-next.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Queued",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:05:00+00:00",
+                    status="rendered",
+                    last_error="queued",
+                    orientation_bucket="horizontal",
+                )
+            )
+            update = _MessageUpdate()
+            context = _FakeContext(services, with_job_queue=True)
+
+            await next_command(update, context)
+
+            promoted = services.database.get_image_by_id("img-next")
+            self.assertEqual(promoted.status, "displayed")
+            self.assertIsNone(promoted.last_error)
+            self.assertEqual(services.display.display_calls[-1], "img-next")
+            self.assertIsNotNone(services.database.get_setting("last_new_image_displayed_at"))
+            self.assertIsNotNone(services.database.get_setting("slideshow_next_fire_at"))
+            self.assertEqual(update.effective_message.replies[-1], "Bild 2 von 2: img-next")
+
+    async def test_prev_ignores_rendered_waiting_images(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-current"}),
+                encoding="utf-8",
+            )
+            for image_id in ("img-previous", "img-current"):
+                original = tmpdir_path / "incoming" / f"{image_id}.jpg"
+                original.parent.mkdir(parents=True, exist_ok=True)
+                original.write_bytes(image_id.encode("utf-8"))
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-previous",
+                    telegram_file_id="file-previous",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-previous.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Previous",
+                    uploaded_by=1,
+                    created_at="2026-03-18T11:55:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-current",
+                    telegram_file_id="file-current",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-current.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Current",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-rendered",
+                    telegram_file_id="file-rendered",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-rendered.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Rendered",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:02:00+00:00",
+                    status="rendered",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await prev_command(update, context)
+
+            self.assertEqual(services.display.display_calls[-1], "img-previous")
+            self.assertEqual(update.effective_message.replies[-1], "Bild 1 von 2: img-previous")
+
 
 class _FakeQueryMessage:
     def __init__(self, *, has_media: bool) -> None:
@@ -199,19 +339,24 @@ class _MessageUpdate:
 
 
 class _FakeContext:
-    def __init__(self, services) -> None:
-        self.application = SimpleNamespace(bot_data={"services": services, "display_lock": asyncio.Lock()})
+    def __init__(self, services, *, with_job_queue: bool = False) -> None:
+        self.application = SimpleNamespace(
+            bot_data={"services": services, "display_lock": asyncio.Lock()},
+            job_queue=_FakeJobQueue() if with_job_queue else None,
+        )
         self.user_data: dict[str, object] = {}
 
 
 class _FakeDisplay:
     def __init__(self) -> None:
         self.orientation = "horizontal"
+        self.display_calls: list[str] = []
 
     def current_orientation(self) -> str:
         return self.orientation
 
     def display(self, request) -> DisplayResult:
+        self.display_calls.append(request.image_id)
         return DisplayResult(True, f"displayed {request.image_id}")
 
     def payload_exists(self) -> bool:
@@ -233,6 +378,23 @@ class _FakeAuth:
 
     def is_whitelisted(self, user_id: int) -> bool:
         return True
+
+
+class _FakeJob:
+    def schedule_removal(self) -> None:
+        return None
+
+
+class _FakeJobQueue:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def get_jobs_by_name(self, name: str):
+        return []
+
+    def run_repeating(self, callback, *, interval: int, first: int, name: str) -> _FakeJob:
+        self.calls.append({"interval": interval, "first": first, "name": name})
+        return _FakeJob()
 
 
 def _build_services(base_dir: Path):

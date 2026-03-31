@@ -4,9 +4,12 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 quick_mode=0
+clear_images=0
 for arg in "$@"; do
   if [[ "${arg}" == "--quick" ]]; then
     quick_mode=1
+  elif [[ "${arg}" == "--clear-images" ]]; then
+    clear_images=1
   fi
 done
 
@@ -59,6 +62,11 @@ else
 fi
 
 initialize_database
+
+if [[ "${clear_images}" == "1" ]]; then
+  echo "Clearing stored image library while preserving the current display payload."
+  "${RUN_PYTHON}" -m app.library_cleanup --config "${CONFIG_FILE}"
+fi
 
 if systemd_unit_exists 'photo-frame.service'; then
   echo "Restarting photo-frame.service."

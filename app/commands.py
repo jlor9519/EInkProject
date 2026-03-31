@@ -354,6 +354,17 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
         return
     active_orientation = get_active_orientation(services)
 
+    if direction == "next":
+        target, result = await _try_promote_next_rendered(update, context, services, active_orientation)
+        if target is not None:
+            total = services.database.count_displayed_images(active_orientation)
+            position = services.database.get_displayed_image_position(target.image_id, active_orientation)
+            if result.success:
+                await message.reply_text(f"Bild {position} von {total}: {target.image_id}")
+            else:
+                await message.reply_text(_friendly_display_error(result.message))
+            return
+
     payload_path = services.config.storage.current_payload_path
     if not payload_path.exists():
         await message.reply_text("Noch kein Bild vorhanden.")
@@ -370,7 +381,10 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
         await message.reply_text("Kein aktuelles Bild erkannt.")
         return
 
-    target = services.database.get_adjacent_image(current_image_id, direction, active_orientation)
+    if direction == "next":
+        target = services.database.get_next_navigation_target(current_image_id, active_orientation)
+    else:
+        target = services.database.get_adjacent_image(current_image_id, direction, active_orientation)
     if target is None:
         await message.reply_text("Kein weiteres Bild vorhanden.")
         return
@@ -386,6 +400,33 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
         reschedule_slideshow_job(context.application)
     else:
         await message.reply_text(_friendly_display_error(result.message))
+
+
+async def _try_promote_next_rendered(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    services: AppServices,
+    active_orientation: str,
+) -> tuple[ImageRecord | None, DisplayResult]:
+    rendered = services.database.get_oldest_rendered_image_for_orientation(active_orientation)
+    if rendered is None:
+        return None, DisplayResult(False, "")
+
+    result = await _display_target(services, rendered)
+    if result.success:
+        rendered.status = "displayed"
+        rendered.last_error = None
+        services.database.upsert_image(rendered)
+        now = utcnow_iso()
+        services.database.set_setting("current_image_displayed_at", now)
+        services.database.set_setting("last_new_image_displayed_at", now)
+        from app.slideshow import reschedule_slideshow_job
+        reschedule_slideshow_job(context.application)
+    else:
+        rendered.status = "display_failed"
+        rendered.last_error = result.message
+        services.database.upsert_image(rendered)
+    return rendered, result
 
 
 @require_whitelist

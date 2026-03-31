@@ -32,6 +32,11 @@ class ScriptTests(unittest.TestCase):
         self.assertIn("prompt_value", install_text)
         self.assertIn("setup_inkypi.sh", install_text)
 
+    def test_update_script_supports_clear_images_flag(self) -> None:
+        update_text = (PROJECT_ROOT / "scripts" / "update.sh").read_text(encoding="utf-8")
+        self.assertIn("--clear-images", update_text)
+        self.assertIn("app.library_cleanup", update_text)
+
     def test_foreground_telegram_runner_is_non_daemonized(self) -> None:
         runner_text = (PROJECT_ROOT / "scripts" / "test_telegram_bot.sh").read_text(encoding="utf-8")
         self.assertIn("-m app.main", runner_text)
