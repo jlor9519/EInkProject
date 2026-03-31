@@ -179,7 +179,6 @@ async def settings_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return ConversationHandler.END
     # Inject database-stored settings for display
     device_settings["image_fit_mode"] = services.database.get_setting("image_fit_mode") or "fill"
-    device_settings["local_image_limit"] = services.database.get_setting("local_image_limit") or "50"
     device_settings["slideshow_interval"] = services.display.get_slideshow_interval()
     cooldown_raw = services.database.get_setting("new_image_cooldown")
     device_settings["new_image_cooldown"] = int(cooldown_raw) if cooldown_raw is not None else 3600

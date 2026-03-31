@@ -194,24 +194,6 @@ def _friendly_display_error(message: str) -> str:
     return f"Anzeige fehlgeschlagen: {message}"
 
 
-def _format_interval(seconds: int) -> str:
-    if seconds < 60:
-        return f"{seconds} Sekunden"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes} {'Minute' if minutes == 1 else 'Minuten'}"
-    hours = minutes // 60
-    rem_min = minutes % 60
-    if hours < 24:
-        if rem_min:
-            return f"{hours} Std. {rem_min} Min."
-        return f"{hours} {'Stunde' if hours == 1 else 'Stunden'}"
-    days = hours // 24
-    rem_hours = hours % 24
-    if rem_hours:
-        return f"{days} {'Tag' if days == 1 else 'Tage'} {rem_hours} Std."
-    return f"{days} {'Tag' if days == 1 else 'Tage'}"
-
 
 @require_whitelist
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -261,6 +243,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Time remaining until next image change — read directly from stored timestamp
     from datetime import datetime, timezone as tz
     from app.slideshow import _is_in_sleep_window, _seconds_until_wake_up
+    from app.settings_conversation import _format_interval_label
     now = datetime.now(tz.utc)
     next_fire_raw = services.database.get_setting("slideshow_next_fire_at")
     remaining = 0
@@ -273,7 +256,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except (ValueError, TypeError):
             remaining = 0
 
-    remaining_str = _format_interval(remaining) if remaining > 0 else "weniger als 1 Minute"
+    remaining_str = _format_interval_label(remaining) if remaining > 0 else "weniger als 1 Minute"
     lines.append(f"  Wechsel in ca. {remaining_str}")
 
     # Show pending new images (rendered, waiting for cooldown)
@@ -285,7 +268,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         lines.append("")
         lines.append(f"Warteschlange: {rendered_count} neue{'s' if rendered_count == 1 else ''} Bild{'er' if rendered_count != 1 else ''}")
         if cd_remaining > 0:
-            lines.append(f"  Nächstes neues Bild in ca. {_format_interval(cd_remaining)}")
+            lines.append(f"  Nächstes neues Bild in ca. {_format_interval_label(cd_remaining)}")
 
     if next_images:
         lines.append("")
@@ -294,7 +277,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             pos = ((current_pos or 0) + i - 1) % total + 1
             lines.append(f"{i}. [{pos}/{total}] {_image_label(record)}")
             offset = remaining + (i - 1) * interval
-            eta_str = _format_interval(offset) if offset > 0 else "weniger als 1 Minute"
+            eta_str = _format_interval_label(offset) if offset > 0 else "weniger als 1 Minute"
             lines.append(f"   In ca. {eta_str}")
 
     await message.reply_text("\n".join(lines))

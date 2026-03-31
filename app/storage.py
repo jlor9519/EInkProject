@@ -4,10 +4,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
-
-if TYPE_CHECKING:
-    from app.models import ImageRecord
+from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -47,22 +44,6 @@ class StorageService:
             logger.info("Cleaning up %d old rendered file(s)", len(to_remove))
         for old_file in to_remove:
             old_file.unlink(missing_ok=True)
-
-    def prune_local_originals(self, keep: int, records: list[ImageRecord]) -> int:
-        """Delete oldest local original files beyond `keep`.
-
-        Database records are intentionally left unchanged.
-        Returns the number of files deleted.
-        """
-        to_prune = records[:-keep] if keep > 0 else records
-        deleted = 0
-        for record in to_prune:
-            path = Path(record.local_original_path)
-            if path.exists():
-                path.unlink(missing_ok=True)
-                logger.info("Pruned local original: %s", path.name)
-                deleted += 1
-        return deleted
 
     def _directories(self) -> Iterable[Path]:
         return (

@@ -332,14 +332,6 @@ class Database:
             ).fetchone()
             return int(row["count"] if row else 0)
 
-    def get_all_images_ordered(self) -> list[ImageRecord]:
-        """All image records ordered oldest-first, for pruning decisions."""
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT * FROM images ORDER BY created_at ASC"
-            ).fetchall()
-            return [self._row_to_image(r) for r in rows]
-
     def get_next_images(self, current_image_id: str, n: int) -> list[ImageRecord]:
         """Get the next N displayed images after current_image_id, wrapping around."""
         with self._lock:

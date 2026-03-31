@@ -24,7 +24,7 @@ from telegram.ext import (
 from app.auth import require_whitelist
 from app.commands import get_display_lock, get_services
 from app.database import utcnow_iso
-from app.models import DisplayRequest, ImageRecord, RenderError
+from app.models import DisplayRequest, ImageRecord
 
 (
     WAITING_FOR_TEXT_CHOICE,

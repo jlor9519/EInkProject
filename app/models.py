@@ -5,18 +5,6 @@ from pathlib import Path
 from typing import Any
 
 
-class PhotoFrameError(Exception):
-    """Base exception for photo frame application errors."""
-
-
-class RenderError(PhotoFrameError):
-    """Raised when image rendering fails."""
-
-
-class DisplayError(PhotoFrameError):
-    """Raised when display update fails."""
-
-
 @dataclass(slots=True)
 class TelegramConfig:
     bot_token: str
