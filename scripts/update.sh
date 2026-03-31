@@ -64,7 +64,7 @@ fi
 initialize_database
 
 if [[ "${clear_images}" == "1" ]]; then
-  echo "Clearing stored image library while preserving the current display payload."
+  echo "Clearing all stored image data without pushing a new display update."
   "${RUN_PYTHON}" -m app.library_cleanup --config "${CONFIG_FILE}"
 fi
 

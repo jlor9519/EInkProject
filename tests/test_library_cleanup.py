@@ -6,20 +6,22 @@ import unittest
 from pathlib import Path
 
 from app.database import Database
-from app.library_cleanup import clear_non_current_images
+from app.library_cleanup import clear_all_images
 from app.models import ImageRecord
 
 
 class LibraryCleanupTests(unittest.TestCase):
-    def test_clear_non_current_images_preserves_current_payload_image(self) -> None:
+    def test_clear_all_images_removes_database_rows_and_local_payload_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             database = Database(tmpdir_path / "frame.db")
             database.initialize()
 
             payload_path = tmpdir_path / "inkypi" / "current.json"
+            current_image_path = tmpdir_path / "inkypi" / "current.png"
             payload_path.parent.mkdir(parents=True, exist_ok=True)
             payload_path.write_text(json.dumps({"image_id": "img-current"}), encoding="utf-8")
+            current_image_path.write_bytes(b"current-payload-image")
 
             current_original = tmpdir_path / "incoming" / "img-current.jpg"
             current_rendered = tmpdir_path / "rendered" / "img-current.png"
@@ -64,17 +66,18 @@ class LibraryCleanupTests(unittest.TestCase):
                 )
             )
 
-            summary = clear_non_current_images(database, payload_path)
+            summary = clear_all_images(database, payload_path, current_image_path)
 
-            self.assertEqual(summary.preserved_image_id, "img-current")
-            self.assertEqual(summary.deleted_images, 1)
-            self.assertEqual(summary.deleted_files, 2)
-            self.assertIsNotNone(database.get_image_by_id("img-current"))
+            self.assertEqual(summary.deleted_images, 2)
+            self.assertEqual(summary.deleted_files, 6)
+            self.assertIsNone(database.get_image_by_id("img-current"))
             self.assertIsNone(database.get_image_by_id("img-old"))
-            self.assertTrue(current_original.exists())
-            self.assertTrue(current_rendered.exists())
+            self.assertFalse(current_original.exists())
+            self.assertFalse(current_rendered.exists())
             self.assertFalse(old_original.exists())
             self.assertFalse(old_rendered.exists())
+            self.assertFalse(payload_path.exists())
+            self.assertFalse(current_image_path.exists())
 
 
 if __name__ == "__main__":
