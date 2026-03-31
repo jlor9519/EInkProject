@@ -79,7 +79,6 @@ class Database:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_images_orientation ON images(orientation_bucket);
                 CREATE INDEX IF NOT EXISTS idx_maintenance_jobs_status ON maintenance_jobs(status, created_at DESC);
                 """
             )
@@ -98,6 +97,9 @@ class Database:
             self._connection.execute(
                 "UPDATE images SET orientation_bucket = ? WHERE orientation_bucket IS NULL OR orientation_bucket = ''",
                 (ORIENTATION_SHARED,),
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_images_orientation ON images(orientation_bucket)"
             )
             self._connection.commit()
         logger.info("Database initialized at %s", self.db_path)

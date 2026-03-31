@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -159,6 +160,61 @@ class DatabaseTests(unittest.TestCase):
             record = database.get_image_by_id("legacy")
 
             self.assertIsNotNone(record)
+            self.assertEqual(record.orientation_bucket, "shared")
+
+    def test_initialize_migrates_true_legacy_images_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "frame.db"
+            connection = sqlite3.connect(db_path)
+            connection.execute(
+                """
+                CREATE TABLE images (
+                    image_id TEXT PRIMARY KEY,
+                    telegram_file_id TEXT NOT NULL,
+                    local_original_path TEXT NOT NULL,
+                    local_rendered_path TEXT,
+                    location TEXT NOT NULL,
+                    taken_at TEXT NOT NULL,
+                    caption TEXT NOT NULL,
+                    uploaded_by INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    last_error TEXT
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO images (
+                    image_id, telegram_file_id, local_original_path, local_rendered_path,
+                    location, taken_at, caption, uploaded_by, created_at, status, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy",
+                    "file-legacy",
+                    "/tmp/original.jpg",
+                    None,
+                    "",
+                    "",
+                    "",
+                    1,
+                    "2026-03-18T12:00:00+00:00",
+                    "displayed",
+                    None,
+                ),
+            )
+            connection.commit()
+            connection.close()
+
+            database = Database(db_path)
+            database.initialize()
+
+            record = database.get_image_by_id("legacy")
+
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.telegram_chat_id, None)
             self.assertEqual(record.orientation_bucket, "shared")
 
     def test_maintenance_job_lifecycle(self) -> None:
