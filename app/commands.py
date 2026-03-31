@@ -12,15 +12,11 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from app.auth import require_admin, require_whitelist
 from app.database import utcnow_iso
-from app.models import AppServices, DisplayRequest, DisplayResult, ImageRecord, ProcessingReservation
+from app.models import AppServices, DisplayRequest, DisplayResult, ImageRecord
 
 
 def get_services(context: ContextTypes.DEFAULT_TYPE) -> AppServices:
     return context.application.bot_data["services"]
-
-
-def get_reservation(context: ContextTypes.DEFAULT_TYPE) -> ProcessingReservation:
-    return context.application.bot_data["processing_reservation"]
 
 
 def get_display_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
@@ -100,8 +96,16 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         inkypi_line = "✗ nicht erreichbar"
 
     image_count = services.database.count_displayed_images()
+    rendered_count = services.database.count_rendered_images()
     displayed_at = services.database.get_setting("current_image_displayed_at")
     user_count = services.database.count_whitelisted_users()
+
+    image_lines = [
+        f"- In Rotation: {image_count} {'Bild' if image_count == 1 else 'Bilder'}",
+        f"- Aktuelles Bild: {_format_duration(displayed_at)}",
+    ]
+    if rendered_count > 0:
+        image_lines.append(f"- Warteschlange: {rendered_count} neue{'s' if rendered_count == 1 else ''} Bild{'er' if rendered_count != 1 else ''} wartend")
 
     await update.effective_message.reply_text(
         "\n".join(
@@ -115,8 +119,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"- InkyPi-Payload: {'✓ vorhanden' if payload_ok else '✗ nicht gefunden'}",
                 "",
                 "Bilder:",
-                f"- In Rotation: {image_count} {'Bild' if image_count == 1 else 'Bilder'}",
-                f"- Aktuelles Bild: {_format_duration(displayed_at)}",
+                *image_lines,
                 "",
                 "Nutzer:",
                 f"- Freigegebene Nutzer: {user_count}",
@@ -161,11 +164,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if original_path:
             Path(original_path).unlink(missing_ok=True)
 
-    reservation = get_reservation(context)
-    if reservation.owner_user_id == user.id:
-        reservation.owner_user_id = None
-        reservation.image_id = None
-    context.user_data.clear()
+    context.user_data.pop("pending_submission", None)
     await update.effective_message.reply_text("Der aktuelle Upload wurde abgebrochen.")
     return ConversationHandler.END
 
@@ -258,30 +257,35 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     lines.append(f"{current_label}")
 
     interval = await asyncio.to_thread(services.display.get_slideshow_interval)
-    displayed_at = services.database.get_setting("current_image_displayed_at")
 
-    # Time remaining for current image
+    # Time remaining until next image change — read directly from stored timestamp
     from datetime import datetime, timezone as tz
     from app.slideshow import _is_in_sleep_window, _seconds_until_wake_up
     now = datetime.now(tz.utc)
-    elapsed = 0
-    if displayed_at:
+    next_fire_raw = services.database.get_setting("slideshow_next_fire_at")
+    remaining = 0
+    if next_fire_raw:
         try:
-            since = datetime.fromisoformat(displayed_at)
-            if since.tzinfo is None:
-                since = since.replace(tzinfo=tz.utc)
-            elapsed = max(0, int((now - since).total_seconds()))
+            next_fire = datetime.fromisoformat(next_fire_raw)
+            if next_fire.tzinfo is None:
+                next_fire = next_fire.replace(tzinfo=tz.utc)
+            remaining = max(0, int((next_fire - now).total_seconds()))
         except (ValueError, TypeError):
-            elapsed = 0
-    remaining = max(0, interval - elapsed)
-
-    sleep_schedule = await asyncio.to_thread(services.display.get_sleep_schedule)
-    in_sleep = bool(sleep_schedule and _is_in_sleep_window(sleep_schedule))
-    if in_sleep:
-        remaining = _seconds_until_wake_up(sleep_schedule)
+            remaining = 0
 
     remaining_str = _format_interval(remaining) if remaining > 0 else "weniger als 1 Minute"
     lines.append(f"  Wechsel in ca. {remaining_str}")
+
+    # Show pending new images (rendered, waiting for cooldown)
+    rendered_count = services.database.count_rendered_images()
+    if rendered_count > 0:
+        from app.conversations import _get_cooldown_seconds, _cooldown_remaining
+        cooldown = _get_cooldown_seconds(services)
+        cd_remaining = _cooldown_remaining(services, cooldown)
+        lines.append("")
+        lines.append(f"Warteschlange: {rendered_count} neue{'s' if rendered_count == 1 else ''} Bild{'er' if rendered_count != 1 else ''}")
+        if cd_remaining > 0:
+            lines.append(f"  Nächstes neues Bild in ca. {_format_interval(cd_remaining)}")
 
     if next_images:
         lines.append("")
@@ -457,7 +461,7 @@ async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
 
     lock = get_display_lock(context)
     if lock.locked():
-        await query.edit_message_caption(caption="Eine Aktualisierung läuft bereits. Bitte warten.")
+        await _edit_query_message(query, "Eine Aktualisierung läuft bereits. Bitte warten.")
         return
 
     async with lock:
@@ -472,12 +476,13 @@ async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
             replacement = services.database.get_adjacent_image(image_id, "prev")
 
         if replacement is None:
-            await query.edit_message_caption(
-                caption="Das letzte Bild kann nicht gelöscht werden. Lade zuerst ein neues Bild hoch."
+            await _edit_query_message(
+                query,
+                "Das letzte Bild kann nicht gelöscht werden. Lade zuerst ein neues Bild hoch.",
             )
             return
 
-        await query.edit_message_caption(caption=f"Wird gelöscht...")
+        await _edit_query_message(query, "Wird gelöscht...")
 
         # Delete from database
         services.database.delete_image(image_id)
@@ -493,14 +498,16 @@ async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
         total = services.database.count_displayed_images()
         if result.success:
             services.database.set_setting("current_image_displayed_at", utcnow_iso())
-            await query.edit_message_caption(
-                caption=f"Bild {image_id} gelöscht. Zeige jetzt {replacement.image_id} ({total} Bilder verbleibend)."
+            await _edit_query_message(
+                query,
+                f"Bild {image_id} gelöscht. Zeige jetzt {replacement.image_id} ({total} Bilder verbleibend).",
             )
             from app.slideshow import reschedule_slideshow_job
             reschedule_slideshow_job(context.application)
         else:
-            await query.edit_message_caption(
-                caption=f"Bild {image_id} gelöscht. {_friendly_display_error(result.message)}"
+            await _edit_query_message(
+                query,
+                f"Bild {image_id} gelöscht. {_friendly_display_error(result.message)}",
             )
 
 
@@ -509,7 +516,7 @@ async def delete_cancel_callback(update: Update, context: ContextTypes.DEFAULT_T
     if query is None:
         return
     await query.answer()
-    await query.edit_message_caption(caption="Löschen abgebrochen.")
+    await _edit_query_message(query, "Löschen abgebrochen.")
 
 
 @require_admin
@@ -569,3 +576,27 @@ async def stray_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.effective_message.reply_text(
             "Du bist für diesen Fotorahmen nicht freigegeben. Nutze /myid und teile deine ID mit einem Admin."
         )
+
+
+async def _edit_query_message(query, text: str) -> None:
+    message = query.message
+    has_media = bool(
+        getattr(message, "photo", None)
+        or getattr(message, "document", None)
+        or getattr(message, "animation", None)
+        or getattr(message, "video", None)
+    )
+    if has_media:
+        try:
+            await query.edit_message_caption(caption=text)
+            return
+        except Exception:
+            pass
+    try:
+        await query.edit_message_text(text)
+    except Exception:
+        try:
+            if not has_media:
+                await query.edit_message_caption(caption=text)
+        except Exception:
+            logger.warning("Could not edit query message")

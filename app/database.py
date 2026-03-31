@@ -44,6 +44,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS images (
                     image_id TEXT PRIMARY KEY,
                     telegram_file_id TEXT NOT NULL,
+                    telegram_chat_id INTEGER,
                     local_original_path TEXT NOT NULL,
                     local_rendered_path TEXT,
                     location TEXT NOT NULL,
@@ -63,6 +64,14 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC);
                 """
             )
+            columns = {
+                row["name"]
+                for row in self._connection.execute("PRAGMA table_info(images)").fetchall()
+            }
+            if "telegram_chat_id" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE images ADD COLUMN telegram_chat_id INTEGER"
+                )
             self._connection.commit()
         logger.info("Database initialized at %s", self.db_path)
 
@@ -155,6 +164,7 @@ class Database:
                 INSERT INTO images (
                     image_id,
                     telegram_file_id,
+                    telegram_chat_id,
                     local_original_path,
                     local_rendered_path,
                     location,
@@ -164,9 +174,10 @@ class Database:
                     created_at,
                     status,
                     last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(image_id) DO UPDATE SET
                     telegram_file_id = excluded.telegram_file_id,
+                    telegram_chat_id = excluded.telegram_chat_id,
                     local_original_path = excluded.local_original_path,
                     local_rendered_path = excluded.local_rendered_path,
                     location = excluded.location,
@@ -180,6 +191,7 @@ class Database:
                 (
                     record.image_id,
                     record.telegram_file_id,
+                    record.telegram_chat_id,
                     record.local_original_path,
                     record.local_rendered_path,
                     record.location,
@@ -279,6 +291,7 @@ class Database:
         return ImageRecord(
             image_id=row["image_id"],
             telegram_file_id=row["telegram_file_id"],
+            telegram_chat_id=row["telegram_chat_id"],
             local_original_path=row["local_original_path"],
             local_rendered_path=row["local_rendered_path"],
             location=row["location"],
@@ -289,6 +302,35 @@ class Database:
             status=row["status"],
             last_error=row["last_error"],
         )
+
+    def reconcile_pending_images(self) -> list[ImageRecord]:
+        with self._lock:
+            self._connection.execute(
+                "UPDATE images SET status = 'queued' WHERE status = 'processing'"
+            )
+            rows = self._connection.execute(
+                "SELECT * FROM images WHERE status = 'queued' ORDER BY created_at ASC"
+            ).fetchall()
+            self._connection.commit()
+            return [self._row_to_image(row) for row in rows]
+
+    def get_oldest_rendered_image(self) -> ImageRecord | None:
+        """Return the oldest image with status 'rendered' (waiting for display)."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM images WHERE status = 'rendered' ORDER BY created_at ASC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_image(row)
+
+    def count_rendered_images(self) -> int:
+        """Count images with status 'rendered' (queued for display after cooldown)."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT COUNT(*) AS count FROM images WHERE status = 'rendered'"
+            ).fetchone()
+            return int(row["count"] if row else 0)
 
     def get_all_images_ordered(self) -> list[ImageRecord]:
         """All image records ordered oldest-first, for pruning decisions."""
@@ -360,4 +402,3 @@ class Database:
                 (key, value),
             )
             self._connection.commit()
-

@@ -33,6 +33,7 @@ _SETTINGS: list[_SettingDef] = [
     _SettingDef("Bildanpassung",       "image_fit_mode",    None,         "fit_mode"),
     _SettingDef("Anzeigedauer",        "slideshow_interval",None,         "interval"),
     _SettingDef("Ruhezeit",            "sleep_schedule",    None,         "sleep_schedule"),
+    _SettingDef("Wartezeit neue Bilder", "new_image_cooldown", None,      "cooldown"),
 ]
 
 _FIT_MODE_LABELS = {"fill": "Zuschneiden", "contain": "Einpassen"}
@@ -128,6 +129,13 @@ def _get_current_value(settings: dict[str, Any], s: _SettingDef) -> str:
         if not raw:
             return "Keine"
         return str(raw)
+    if s.kind == "cooldown":
+        raw = settings.get(s.key, 3600)
+        try:
+            val = int(raw)
+        except (ValueError, TypeError):
+            val = 3600
+        return "Deaktiviert" if val == 0 else _format_interval_label(val)
     if s.subkey:
         return str(settings.get(s.key, {}).get(s.subkey, "?"))
     return str(settings.get(s.key, "?"))
@@ -173,6 +181,8 @@ async def settings_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     device_settings["image_fit_mode"] = services.database.get_setting("image_fit_mode") or "fill"
     device_settings["local_image_limit"] = services.database.get_setting("local_image_limit") or "50"
     device_settings["slideshow_interval"] = services.display.get_slideshow_interval()
+    cooldown_raw = services.database.get_setting("new_image_cooldown")
+    device_settings["new_image_cooldown"] = int(cooldown_raw) if cooldown_raw is not None else 3600
     schedule = services.display.get_sleep_schedule()
     device_settings["sleep_schedule"] = f"{schedule[0]}–{schedule[1]}" if schedule else ""
     await update.effective_message.reply_text(_format_settings_list(device_settings))
@@ -200,7 +210,11 @@ async def receive_settings_choice(update: Update, context: ContextTypes.DEFAULT_
     context.user_data[PENDING_SETTINGS_KEY] = choice - 1
 
     services = get_services(context)
-    if s.kind == "fit_mode":
+    if s.kind == "cooldown":
+        cooldown_raw = services.database.get_setting("new_image_cooldown")
+        cooldown_val = int(cooldown_raw) if cooldown_raw is not None else 3600
+        current = "Deaktiviert" if cooldown_val == 0 else _format_interval_label(cooldown_val)
+    elif s.kind == "fit_mode":
         current_raw = services.database.get_setting("image_fit_mode") or "fill"
         current = _FIT_MODE_LABELS.get(current_raw, current_raw)
     elif s.kind == "integer":
@@ -214,7 +228,15 @@ async def receive_settings_choice(update: Update, context: ContextTypes.DEFAULT_
     else:
         current = _get_current_value(services.display.read_device_settings(), s)
 
-    if s.kind == "orientation":
+    if s.kind == "cooldown":
+        await update.effective_message.reply_text(
+            f"Aktueller Wert für {s.label}: {current}\n\n"
+            "Wie lange soll ein neues Bild mindestens angezeigt werden, bevor das nächste neue Bild erscheint?\n"
+            "Beispiele: 30m, 1h, 2h, 6h\n"
+            "0 = deaktiviert (jedes neue Bild wird sofort angezeigt)\n"
+            "(Maximum 24 Stunden)"
+        )
+    elif s.kind == "orientation":
         await update.effective_message.reply_text(
             f"Aktueller Wert für {s.label}: {current}\n"
             "Gib den neuen Wert ein: horizontal oder vertical."
@@ -258,6 +280,28 @@ async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_T
     s = _SETTINGS[idx]
     text = (update.effective_message.text or "").strip().lower()
     services = get_services(context)
+
+    if s.kind == "cooldown":
+        if text in ("0", "aus", "off", "deaktiviert", "deaktivieren"):
+            seconds = 0
+        else:
+            seconds = _parse_interval_input(text)
+        if seconds is None:
+            await update.effective_message.reply_text(
+                "Ungültiges Format. Beispiele: 30m, 1h, 2h, 0 — oder nutze /cancel."
+            )
+            context.user_data[PENDING_SETTINGS_KEY] = idx
+            return WAITING_FOR_SETTINGS_VALUE
+        if seconds < 0 or seconds > 86400:
+            await update.effective_message.reply_text(
+                "Der Wert muss zwischen 0 und 24 Stunden liegen. Bitte erneut eingeben oder /cancel."
+            )
+            context.user_data[PENDING_SETTINGS_KEY] = idx
+            return WAITING_FOR_SETTINGS_VALUE
+        services.database.set_setting("new_image_cooldown", str(seconds))
+        label = "Deaktiviert" if seconds == 0 else _format_interval_label(seconds)
+        await update.effective_message.reply_text(f"{s.label} ist jetzt {label}.")
+        return ConversationHandler.END
 
     if s.kind == "orientation":
         orientation = _normalize_orientation_value(text)
@@ -373,7 +417,7 @@ async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_T
         status = f"{s.label} ist jetzt {label}" if result.success else f"{s.label} wurde als {label} gespeichert"
         await update.effective_message.reply_text(f"{status}.\n{result.message}")
         from app.slideshow import reschedule_slideshow_job
-        reschedule_slideshow_job(context.application, seconds)
+        reschedule_slideshow_job(context.application, interval_seconds=seconds)
         return ConversationHandler.END
     else:
         try:

@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TimedOut
 from telegram.ext import (
+    Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -21,9 +22,9 @@ from telegram.ext import (
 )
 
 from app.auth import require_whitelist
-from app.commands import get_reservation, get_services
+from app.commands import get_display_lock, get_services
 from app.database import utcnow_iso
-from app.models import DisplayError, DisplayRequest, ImageRecord, RenderError
+from app.models import DisplayRequest, ImageRecord, RenderError
 
 (
     WAITING_FOR_TEXT_CHOICE,
@@ -33,19 +34,15 @@ from app.models import DisplayError, DisplayRequest, ImageRecord, RenderError
     WAITING_FOR_PREVIEW_CONFIRM,
 ) = range(5)
 PENDING_SUBMISSION_KEY = "pending_submission"
+UPLOAD_QUEUE_KEY = "upload_queue"
 
 
-def _discard_pending_submission(context: ContextTypes.DEFAULT_TYPE, *, user_id: int | None = None) -> None:
+def _discard_pending_submission(context: ContextTypes.DEFAULT_TYPE) -> None:
     pending = context.user_data.get(PENDING_SUBMISSION_KEY)
     if isinstance(pending, dict):
         original_path = pending.get("original_path")
         if original_path:
             Path(original_path).unlink(missing_ok=True)
-
-    reservation = get_reservation(context)
-    if user_id is None or reservation.owner_user_id == user_id:
-        reservation.owner_user_id = None
-        reservation.image_id = None
     context.user_data.pop(PENDING_SUBMISSION_KEY, None)
 
 
@@ -77,19 +74,24 @@ def _caption_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _caption_prompt(pending: dict[str, Any]) -> str:
+    lines = [
+        "Welche Bildunterschrift soll unter dem Foto angezeigt werden?",
+        "",
+        "Schreibe den Text in das Textfeld oder wähle eine Option.",
+    ]
+    suggested_caption = str(pending.get("caption") or "").strip()
+    if suggested_caption:
+        lines.extend(["", f"Aktueller Vorschlag: {suggested_caption}"])
+    return "\n".join(lines)
+
+
 @require_whitelist(conversation=True)
 async def photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     services = get_services(context)
     user = update.effective_user
     message = update.effective_message
     if user is None or message is None or not message.photo:
-        return ConversationHandler.END
-
-    reservation = get_reservation(context)
-    if reservation.owner_user_id is not None and reservation.owner_user_id != user.id:
-        await message.reply_text(
-            "Ein anderes Foto wird gerade verarbeitet. Bitte warte einen Moment und sende dein Foto erneut."
-        )
         return ConversationHandler.END
 
     if context.user_data.get(PENDING_SUBMISSION_KEY):
@@ -99,8 +101,6 @@ async def photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     photo = message.photo[-1]
     image_id = services.storage.generate_image_id()
     original_path = services.storage.original_path(image_id)
-    reservation.owner_user_id = user.id
-    reservation.image_id = image_id
 
     try:
         logger.info("Downloading photo %s from user %d", image_id, user.id)
@@ -108,8 +108,6 @@ async def photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await telegram_file.download_to_drive(custom_path=str(original_path))
     except Exception as exc:  # pragma: no cover - depends on Telegram runtime
         logger.exception("Failed to download photo %s from Telegram", image_id)
-        reservation.owner_user_id = None
-        reservation.image_id = None
         await message.reply_text(f"Fehler beim Herunterladen des Fotos von Telegram: {exc}")
         return ConversationHandler.END
 
@@ -117,6 +115,7 @@ async def photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         "image_id": image_id,
         "telegram_file_id": photo.file_id,
         "original_path": str(original_path),
+        "caption": (message.caption or "").strip(),
     }
 
     keyboard = InlineKeyboardMarkup([
@@ -167,7 +166,7 @@ async def receive_taken_at(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return ConversationHandler.END
     pending["taken_at"] = (update.effective_message.text or "").strip()
     await update.effective_message.reply_text(
-        "Welche Bildunterschrift soll unter dem Foto angezeigt werden?\n\nSchreibe den Text in das Textfeld oder wähle eine Option.",
+        _caption_prompt(pending),
         reply_markup=_caption_keyboard(),
     )
     return WAITING_FOR_CAPTION
@@ -317,7 +316,7 @@ async def photo_button_callback(update: Update, context: ContextTypes.DEFAULT_TY
         pending["taken_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         await query.edit_message_text(f"Datum: {pending['taken_at']}")
         await query.message.reply_text(
-            "Welche Bildunterschrift soll unter dem Foto angezeigt werden?\n\nSchreibe den Text in das Textfeld oder wähle eine Option.",
+            _caption_prompt(pending),
             reply_markup=_caption_keyboard(),
         )
         return WAITING_FOR_CAPTION
@@ -326,7 +325,7 @@ async def photo_button_callback(update: Update, context: ContextTypes.DEFAULT_TY
         pending["taken_at"] = ""
         await query.edit_message_text("Datum: übersprungen")
         await query.message.reply_text(
-            "Welche Bildunterschrift soll unter dem Foto angezeigt werden?\n\nSchreibe den Text in das Textfeld oder wähle eine Option.",
+            _caption_prompt(pending),
             reply_markup=_caption_keyboard(),
         )
         return WAITING_FOR_CAPTION
@@ -347,7 +346,10 @@ async def photo_button_callback(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             await query.edit_message_caption(caption="Wird verarbeitet...")
         except Exception:
-            pass
+            try:
+                await query.edit_message_text("Wird verarbeitet...")
+            except Exception:
+                pass
         return await _submit_photo(
             update,
             context,
@@ -365,8 +367,7 @@ async def photo_button_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 await query.edit_message_caption(caption="Upload abgebrochen.")
             except Exception:
                 pass
-        user = update.effective_user
-        _discard_pending_submission(context, user_id=user.id if user else None)
+        _discard_pending_submission(context)
         return ConversationHandler.END
 
     return ConversationHandler.END
@@ -394,9 +395,13 @@ async def _submit_photo(
     if message is None:
         return ConversationHandler.END
 
+    chat = update.effective_chat or getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+
     record = ImageRecord(
         image_id=pending["image_id"],
         telegram_file_id=pending["telegram_file_id"],
+        telegram_chat_id=chat_id,
         local_original_path=pending["original_path"],
         local_rendered_path=None,
         location=location,
@@ -404,41 +409,201 @@ async def _submit_photo(
         caption=caption,
         uploaded_by=user.id,
         created_at=utcnow_iso(),
-        status="processing",
+        status="queued",
         last_error=None,
     )
+    try:
+        services.database.upsert_image(record)
+        queue = _get_upload_queue(context)
+        await queue.put(record.image_id)
+    except Exception as exc:
+        logger.exception("Failed to enqueue image %s", record.image_id)
+        record.status = "failed"
+        record.last_error = str(exc)
+        services.database.upsert_image(record)
+        await _safe_reply_text(message, f"Verarbeitung fehlgeschlagen: {exc}")
+        context.user_data.pop(PENDING_SUBMISSION_KEY, None)
+        return ConversationHandler.END
+
+    await _safe_reply_text(
+        message,
+        f"Dein Foto wurde in die Warteschlange aufgenommen.\nBild-ID: {record.image_id}",
+    )
+    context.user_data.pop(PENDING_SUBMISSION_KEY, None)
+    return ConversationHandler.END
+
+
+def _get_upload_queue(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Queue[str]:
+    return context.application.bot_data[UPLOAD_QUEUE_KEY]
+
+
+def _append_record_warning(record: ImageRecord, warning: str) -> ImageRecord:
+    warning = warning.strip()
+    if not warning:
+        return record
+    existing = [part.strip() for part in (record.last_error or "").split("|") if part.strip()]
+    if warning not in existing:
+        existing.append(warning)
+    record.last_error = " | ".join(existing)
+    if record.status == "displayed":
+        record.status = "displayed_with_warnings"
+    return record
+
+
+async def _safe_reply_text(message, text: str) -> bool:
+    try:
+        await _send_reply_text_with_retry(message, text)
+        return True
+    except Exception:
+        logger.warning("Failed to send Telegram reply to the active conversation", exc_info=True)
+        return False
+
+
+async def _send_reply_text_with_retry(message, text: str) -> None:
+    try:
+        await message.reply_text(text, write_timeout=60)
+    except TimedOut:
+        logger.warning("Telegram reply timed out; retrying once")
+        await message.reply_text(text, write_timeout=60)
+
+
+async def _send_chat_text_with_retry(application: Application, chat_id: int, text: str) -> None:
+    try:
+        await application.bot.send_message(chat_id=chat_id, text=text, write_timeout=60)
+    except TimedOut:
+        logger.warning("Telegram completion message timed out for chat %s; retrying once", chat_id)
+        await application.bot.send_message(chat_id=chat_id, text=text, write_timeout=60)
+
+
+async def _notify_completion(
+    application: Application,
+    record: ImageRecord,
+    text: str,
+) -> ImageRecord:
+    if record.telegram_chat_id is None:
+        logger.warning("Skipping completion message for %s because telegram_chat_id is missing", record.image_id)
+        return record
+
+    try:
+        await _send_chat_text_with_retry(application, record.telegram_chat_id, text)
+    except Exception as exc:
+        logger.warning("Failed to notify chat %s for image %s", record.telegram_chat_id, record.image_id, exc_info=True)
+        return _append_record_warning(record, f"Telegram-Benachrichtigung fehlgeschlagen: {exc}")
+    return record
+
+
+def _get_cooldown_seconds(services) -> int:
+    """Read the new_image_cooldown setting. 0 means disabled."""
+    raw = services.database.get_setting("new_image_cooldown")
+    if raw is None:
+        return 3600
+    try:
+        return max(0, int(raw))
+    except (ValueError, TypeError):
+        return 3600
+
+
+def _cooldown_remaining(services, cooldown: int) -> int:
+    """Seconds remaining before the next new image can be displayed. 0 = ready."""
+    if cooldown <= 0:
+        return 0
+    raw = services.database.get_setting("last_new_image_displayed_at")
+    if not raw:
+        return 0
+    from datetime import datetime, timezone
+    try:
+        last = datetime.fromisoformat(raw)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+        return max(0, int(cooldown - elapsed))
+    except (ValueError, TypeError):
+        return 0
+
+
+async def process_queued_upload(application: Application, image_id: str) -> None:
+    services = application.bot_data["services"]
+    record = services.database.get_image_by_id(image_id)
+    if record is None:
+        logger.warning("Queued image %s no longer exists in the database", image_id)
+        return
+    if record.status not in {"queued", "processing"}:
+        logger.info("Skipping queued image %s because it is already %s", image_id, record.status)
+        return
+
+    record.status = "processing"
     services.database.upsert_image(record)
-    await message.reply_text("Dein Foto wird jetzt verarbeitet.")
 
     fit_mode = services.database.get_setting("image_fit_mode") or "fill"
     rendered_path = services.storage.rendered_path(record.image_id)
+    show_caption = bool(record.location or record.taken_at or record.caption)
+
     try:
-        record, warnings = await _process_image(services, record, rendered_path, show_caption=show_caption, fit_mode=fit_mode)
-        services.database.upsert_image(record)
-        if record.status not in ("failed", "display_failed"):
-            from app.slideshow import reschedule_slideshow_job
-            reschedule_slideshow_job(context.application)
-        await message.reply_text(_build_success_reply(record, warnings))
-        return ConversationHandler.END
+        # Always render the image first (no lock needed for rendering)
+        record, warnings = await _render_image(services, record, rendered_path)
+        if record.status == "failed":
+            services.database.upsert_image(record)
+            record = await _notify_completion(application, record, f"Verarbeitung fehlgeschlagen: {record.last_error}")
+            services.database.upsert_image(record)
+            return
+
+        # Acquire lock before cooldown check to prevent two simultaneous uploads
+        # from both passing the check and displaying at the same time
+        lock = application.bot_data["display_lock"]
+        async with lock:
+            cooldown = _get_cooldown_seconds(services)
+            remaining = _cooldown_remaining(services, cooldown)
+
+            if remaining > 0:
+                # Cooldown active — park as "rendered" and notify user with ETA
+                record.status = "rendered"
+                services.database.upsert_image(record)
+
+                pending_count = services.database.count_rendered_images()
+                from app.settings_conversation import _format_interval_label
+                eta_seconds = remaining + (pending_count - 1) * cooldown
+                eta_label = _format_interval_label(eta_seconds)
+                record = await _notify_completion(
+                    application, record,
+                    f"Dein Foto wurde gerendert und ist in der Warteschlange (Position {pending_count}).\n"
+                    f"Geschätzte Anzeige: in ca. {eta_label}.\n"
+                    f"Bild-ID: {record.image_id}",
+                )
+                services.database.upsert_image(record)
+
+                # Reschedule slideshow to fire when cooldown expires
+                from app.slideshow import reschedule_slideshow_job
+                reschedule_slideshow_job(application, first_seconds=remaining)
+                return
+
+            # Cooldown expired or disabled — display immediately
+            record, display_warnings = await _display_rendered_image(
+                services, record, rendered_path, show_caption=show_caption, fit_mode=fit_mode,
+            )
+            warnings.extend(display_warnings)
+            services.database.upsert_image(record)
+            if record.status not in ("failed", "display_failed"):
+                services.database.set_setting("last_new_image_displayed_at", utcnow_iso())
+                from app.slideshow import reschedule_slideshow_job
+                reschedule_slideshow_job(application)
     except Exception as exc:
         logger.exception("Processing failed for image %s", record.image_id)
         record.status = "failed"
         record.last_error = str(exc)
         record.local_rendered_path = str(rendered_path) if rendered_path.exists() else None
         services.database.upsert_image(record)
-        await message.reply_text(f"Verarbeitung fehlgeschlagen: {exc}")
-        return ConversationHandler.END
-    finally:
-        reservation = get_reservation(context)
-        if reservation.owner_user_id == user.id:
-            reservation.owner_user_id = None
-            reservation.image_id = None
-        context.user_data.pop(PENDING_SUBMISSION_KEY, None)
+        record = await _notify_completion(application, record, f"Verarbeitung fehlgeschlagen: {exc}")
+        services.database.upsert_image(record)
+        return
+
+    record = await _notify_completion(application, record, _build_success_reply(record, warnings))
+    services.database.upsert_image(record)
 
 
-async def _process_image(
-    services: Any, record: ImageRecord, rendered_path: Path, *, show_caption: bool = True, fit_mode: str = "fill",
+async def _render_image(
+    services: Any, record: ImageRecord, rendered_path: Path,
 ) -> tuple[ImageRecord, list[str]]:
+    """Render the image to disk. Does not display it."""
     warnings: list[str] = []
 
     logger.info("Rendering image %s", record.image_id)
@@ -452,8 +617,18 @@ async def _process_image(
             caption=record.caption,
         )
     except OSError as exc:
-        raise RenderError(f"Failed to render image: {exc}") from exc
+        record.status = "failed"
+        record.last_error = f"Failed to render image: {exc}"
+        return record, warnings
     record.local_rendered_path = str(rendered_path)
+    return record, warnings
+
+
+async def _display_rendered_image(
+    services: Any, record: ImageRecord, rendered_path: Path, *, show_caption: bool = True, fit_mode: str = "fill",
+) -> tuple[ImageRecord, list[str]]:
+    """Send an already-rendered image to the display. Caller must hold display_lock."""
+    warnings: list[str] = []
 
     display_request = DisplayRequest(
         image_id=record.image_id,
@@ -514,8 +689,7 @@ _unexpected_preview = _make_unexpected_handler(WAITING_FOR_PREVIEW_CONFIRM)
 
 
 async def _conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user if update else None
-    _discard_pending_submission(context, user_id=user.id if user else None)
+    _discard_pending_submission(context)
     if update and update.effective_message:
         await update.effective_message.reply_text(
             "Dein Upload ist nach 5 Minuten Inaktivität abgelaufen. "

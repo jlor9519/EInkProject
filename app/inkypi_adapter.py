@@ -617,7 +617,7 @@ class InkyPiAdapter:
     def _restart_inkypi_service(self) -> str | None:
         sudo_bin = shutil.which("sudo")
         if sudo_bin is None:
-            return "sudo ist nicht verfugbar."
+            return "sudo ist nicht verfügbar."
 
         restart_command = [
             sudo_bin,
@@ -635,14 +635,14 @@ class InkyPiAdapter:
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            return "Neustart von inkypi.service hat das Zeitlimit uberschritten."
+            return "Neustart von inkypi.service hat das Zeitlimit überschritten."
 
         if restart_completed.returncode != 0:
             stderr = restart_completed.stderr.strip() or restart_completed.stdout.strip() or "unbekannter Fehler"
             if "password is required" in stderr.lower() or "a password is required" in stderr.lower():
                 return (
-                    "nicht-interaktive sudo-Rechte fur inkypi.service fehlen. "
-                    "Fuhre scripts/setup_inkypi.sh erneut aus."
+                    "nicht-interaktive sudo-Rechte für inkypi.service fehlen. "
+                    "Führe scripts/setup_inkypi.sh erneut aus."
                 )
             return stderr
 
@@ -665,7 +665,7 @@ class InkyPiAdapter:
                     check=False,
                 )
             except subprocess.TimeoutExpired:
-                last_status = "Abfrage von inkypi.service hat das Zeitlimit uberschritten."
+                last_status = "Abfrage von inkypi.service hat das Zeitlimit überschritten."
                 time.sleep(1)
                 continue
             if status_completed.returncode == 0 and status_completed.stdout.strip() == "active":

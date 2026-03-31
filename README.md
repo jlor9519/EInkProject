@@ -53,7 +53,7 @@ Before setting up, you will need:
    ```
 2. Clone this repository and run the installer:
    ```bash
-   git clone https://github.com/jlor9519/EInkProject.git ~/EInkProject && cd ~/EInkProject
+   git clone https://github.com/jlor9519/EInkProject.git && cd ~/EInkProject
    bash scripts/install.sh
    ```
    Run the installer as your normal user, not with `sudo`. The script uses `sudo` internally
@@ -99,9 +99,10 @@ To remove everything the installer set up:
    ```
 4. Optionally remove InkyPi if you no longer need it:
    ```bash
-   rm -rf ~/InkyPi
+   sudo rm -rf ~/InkyPi
    sudo rm -rf /usr/local/inkypi
    ```
+   `sudo` is needed because InkyPi's service runs as root and creates `__pycache__` files owned by root inside the checkout.
 5. Optionally remove the apt packages that were installed exclusively for this project:
    ```bash
    sudo apt-get remove --autoremove python3-venv python3-pip fonts-dejavu-core

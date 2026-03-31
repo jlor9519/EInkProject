@@ -88,6 +88,7 @@ class AppConfig:
 class ImageRecord:
     image_id: str
     telegram_file_id: str
+    telegram_chat_id: int | None
     local_original_path: str
     local_rendered_path: str | None
     location: str
@@ -143,12 +144,6 @@ class DeviceSettingsApplyResult:
     reloaded: bool = False
     refreshed: bool = False
     refresh_skipped: bool = False
-
-
-@dataclass(slots=True)
-class ProcessingReservation:
-    owner_user_id: int | None = None
-    image_id: str | None = None
 
 
 @dataclass(slots=True)
