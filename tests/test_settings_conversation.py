@@ -47,6 +47,60 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("4. Helligkeit", reply)
         self.assertIn("5. Ausrichtung: Hochformat", reply)
         self.assertIn("6. Bildanpassung", reply)
+        self.assertIn("10. Täglicher Bildwechsel", reply)
+
+    async def test_scheduled_time_setting_can_be_set_and_cleared(self) -> None:
+        services = _FakeServices(is_admin=True)
+        context = _FakeContext(services)
+
+        # Set a scheduled time
+        update = _FakeUpdate("08:00", user_id=11)
+        context.user_data[PENDING_SETTINGS_KEY] = 9  # index 9 = scheduled_time
+
+        result = await receive_settings_value(update, context)
+
+        self.assertEqual(result, ConversationHandler.END)
+        self.assertEqual(services.database.get_setting("scheduled_change_time"), "08:00")
+        self.assertIn("08:00", update.effective_message.replies[0])
+
+    async def test_scheduled_time_setting_cleared_with_keine(self) -> None:
+        services = _FakeServices(is_admin=True)
+        services.database.set_setting("scheduled_change_time", "08:00")
+        context = _FakeContext(services)
+
+        update = _FakeUpdate("keine", user_id=11)
+        context.user_data[PENDING_SETTINGS_KEY] = 9
+
+        result = await receive_settings_value(update, context)
+
+        self.assertEqual(result, ConversationHandler.END)
+        self.assertEqual(services.database.get_setting("scheduled_change_time"), "")
+        self.assertIn("deaktiviert", update.effective_message.replies[0].lower())
+
+    async def test_scheduled_time_setting_rejects_invalid_time(self) -> None:
+        services = _FakeServices(is_admin=True)
+        context = _FakeContext(services)
+
+        update = _FakeUpdate("25:00", user_id=11)
+        context.user_data[PENDING_SETTINGS_KEY] = 9
+
+        result = await receive_settings_value(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_VALUE)
+        self.assertIn("Ungültige Uhrzeit", update.effective_message.replies[0])
+        self.assertIsNone(services.database.get_setting("scheduled_change_time"))
+
+    async def test_settings_entry_shows_scheduled_time_when_active(self) -> None:
+        services = _FakeServices(is_admin=True)
+        services.database.set_setting("scheduled_change_time", "08:30")
+        update = _FakeUpdate("/settings", user_id=11)
+        context = _FakeContext(services)
+
+        result = await settings_entry(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
+        reply = update.effective_message.replies[0]
+        self.assertIn("08:30", reply)
 
     async def test_receive_settings_value_applies_and_confirms_value(self) -> None:
         services = _FakeServices(is_admin=True)
@@ -302,7 +356,7 @@ class _FakeUpdate:
 
 class _FakeContext:
     def __init__(self, services: _FakeServices):
-        self.application = SimpleNamespace(bot_data={"services": services, "display_lock": asyncio.Lock()})
+        self.application = SimpleNamespace(bot_data={"services": services, "display_lock": asyncio.Lock()}, job_queue=None)
         self.user_data: dict[str, object] = {}
 
 

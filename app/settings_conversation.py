@@ -27,15 +27,16 @@ class _SettingDef:
 
 
 _SETTINGS: list[_SettingDef] = [
-    _SettingDef("Sättigung",           "image_settings",    "saturation", "float"),
-    _SettingDef("Kontrast",            "image_settings",    "contrast",   "float"),
-    _SettingDef("Schärfe",             "image_settings",    "sharpness",  "float"),
-    _SettingDef("Helligkeit",          "image_settings",    "brightness", "float"),
-    _SettingDef("Ausrichtung",         "orientation",       None,         "orientation"),
-    _SettingDef("Bildanpassung",       "image_fit_mode",    None,         "fit_mode"),
-    _SettingDef("Anzeigedauer",        "slideshow_interval",None,         "interval"),
-    _SettingDef("Ruhezeit",            "sleep_schedule",    None,         "sleep_schedule"),
-    _SettingDef("Wartezeit neue Bilder", "new_image_cooldown", None,      "cooldown"),
+    _SettingDef("Sättigung",           "image_settings",       "saturation", "float"),
+    _SettingDef("Kontrast",            "image_settings",       "contrast",   "float"),
+    _SettingDef("Schärfe",             "image_settings",       "sharpness",  "float"),
+    _SettingDef("Helligkeit",          "image_settings",       "brightness", "float"),
+    _SettingDef("Ausrichtung",         "orientation",          None,         "orientation"),
+    _SettingDef("Bildanpassung",       "image_fit_mode",       None,         "fit_mode"),
+    _SettingDef("Anzeigedauer",        "slideshow_interval",   None,         "interval"),
+    _SettingDef("Ruhezeit",            "sleep_schedule",       None,         "sleep_schedule"),
+    _SettingDef("Wartezeit neue Bilder", "new_image_cooldown", None,         "cooldown"),
+    _SettingDef("Täglicher Bildwechsel", "scheduled_change_time", None,     "scheduled_time"),
 ]
 
 _FIT_MODE_LABELS = {"fill": "Zuschneiden", "contain": "Einpassen"}
@@ -136,6 +137,9 @@ def _get_current_value(settings: dict[str, Any], s: _SettingDef) -> str:
         except (ValueError, TypeError):
             val = 3600
         return "Deaktiviert" if val == 0 else _format_interval_label(val)
+    if s.kind == "scheduled_time":
+        raw = settings.get(s.key)
+        return str(raw) if raw else "Deaktiviert"
     if s.subkey:
         return str(settings.get(s.key, {}).get(s.subkey, "?"))
     return str(settings.get(s.key, "?"))
@@ -220,6 +224,7 @@ async def settings_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     device_settings["new_image_cooldown"] = int(cooldown_raw) if cooldown_raw is not None else 3600
     schedule = services.display.get_sleep_schedule()
     device_settings["sleep_schedule"] = f"{schedule[0]}–{schedule[1]}" if schedule else ""
+    device_settings["scheduled_change_time"] = services.database.get_setting("scheduled_change_time") or ""
     await update.effective_message.reply_text(_format_settings_list(device_settings))
     return WAITING_FOR_SETTINGS_CHOICE
 
@@ -260,6 +265,9 @@ async def receive_settings_choice(update: Update, context: ContextTypes.DEFAULT_
     elif s.kind == "sleep_schedule":
         sleep_sched = services.display.get_sleep_schedule()
         current = f"{sleep_sched[0]}–{sleep_sched[1]}" if sleep_sched else "Keine"
+    elif s.kind == "scheduled_time":
+        raw = services.database.get_setting("scheduled_change_time")
+        current = str(raw) if raw else "Deaktiviert"
     else:
         current = _get_current_value(services.display.read_device_settings(), s)
 
@@ -296,6 +304,13 @@ async def receive_settings_choice(update: Update, context: ContextTypes.DEFAULT_
             "Gib die Ruhezeit im Format HH:MM-HH:MM ein (z.B. 22:00-08:00).\n"
             "Das Display wechselt das Bild in dieser Zeit nicht.\n\n"
             "Oder gib \"keine\" ein, um die Ruhezeit zu deaktivieren."
+        )
+    elif s.kind == "scheduled_time":
+        await update.effective_message.reply_text(
+            f"Aktueller Wert für {s.label}: {current}\n\n"
+            "Gib die Uhrzeit ein, zu der täglich ein neues Bild angezeigt werden soll (z.B. 8:00, 08:30).\n"
+            "Wenn aktiv, wird der Bildwechsel genau zu dieser Zeit ausgelöst — unabhängig von der Anzeigedauer.\n\n"
+            "Oder gib \"keine\" ein, um den täglichen Bildwechsel zu deaktivieren."
         )
     else:
         await update.effective_message.reply_text(
@@ -472,6 +487,27 @@ async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_T
         await update.effective_message.reply_text(f"{status}.\n{result.message}")
         from app.slideshow import reschedule_slideshow_job
         reschedule_slideshow_job(context.application, interval_seconds=seconds)
+        return ConversationHandler.END
+    elif s.kind == "scheduled_time":
+        if text in ("keine", "kein", "no", "off", "deaktivieren", "deaktiviert"):
+            services.database.set_setting("scheduled_change_time", "")
+            await update.effective_message.reply_text("Täglicher Bildwechsel ist deaktiviert. Die Anzeigedauer-Einstellung wird wieder verwendet.")
+            from app.slideshow import reschedule_slideshow_job
+            reschedule_slideshow_job(context.application)
+            return ConversationHandler.END
+        time_str = _parse_time_string(text)
+        if time_str is None:
+            await update.effective_message.reply_text(
+                "Ungültige Uhrzeit. Bitte im Format HH:MM eingeben (z.B. 08:00, 8:30), oder /cancel."
+            )
+            context.user_data[PENDING_SETTINGS_KEY] = idx
+            return WAITING_FOR_SETTINGS_VALUE
+        services.database.set_setting("scheduled_change_time", time_str)
+        await update.effective_message.reply_text(
+            f"Täglicher Bildwechsel ist jetzt um {time_str} Uhr. Die Anzeigedauer-Einstellung wird ignoriert, solange dieser Wert aktiv ist."
+        )
+        from app.slideshow import reschedule_slideshow_job
+        reschedule_slideshow_job(context.application)
         return ConversationHandler.END
     else:
         try:

@@ -38,7 +38,12 @@ def schedule_slideshow_job(application: Application) -> None:
         first = max(1, remaining) if remaining > 0 else 1
         logger.info("Startup: %d rendered image(s) waiting, first fire in %ds", rendered_count, first)
     else:
-        first = interval
+        scheduled = _get_scheduled_time(services)
+        if scheduled:
+            first = _seconds_until_time(scheduled)
+            logger.info("Startup: scheduled mode active, first fire in %ds (at %s)", first, scheduled)
+        else:
+            first = interval
 
     application.job_queue.run_repeating(
         _advance_slideshow,
@@ -71,7 +76,12 @@ def reschedule_slideshow_job(
     if interval_seconds is None:
         interval_seconds = services.display.get_slideshow_interval()
     if first_seconds is None:
-        first_seconds = interval_seconds
+        scheduled = _get_scheduled_time(services)
+        if scheduled:
+            first_seconds = _seconds_until_time(scheduled)
+            logger.info("Rescheduling: scheduled mode active, next fire in %ds (at %s)", first_seconds, scheduled)
+        else:
+            first_seconds = interval_seconds
 
     application.job_queue.run_repeating(
         _advance_slideshow,
@@ -83,6 +93,22 @@ def reschedule_slideshow_job(
     services.database.set_setting("current_image_displayed_at", utcnow_iso())
     _set_next_fire_at(services, first_seconds)
     logger.info("Slideshow job rescheduled with interval %ds, first in %ds", interval_seconds, first_seconds)
+
+
+def _get_scheduled_time(services) -> str | None:
+    """Return the scheduled daily change time as 'HH:MM', or None if disabled."""
+    return services.database.get_setting("scheduled_change_time") or None
+
+
+def _seconds_until_time(time_str: str) -> int:
+    """Seconds from now until the next occurrence of HH:MM (today or tomorrow)."""
+    h, m = time_str.split(":")
+    target_time = dt_time(int(h), int(m))
+    now = datetime.now()
+    target = now.replace(hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return max(1, int((target - now).total_seconds()))
 
 
 def _seconds_until_wake_up(schedule: tuple[str, str]) -> int:
@@ -159,7 +185,11 @@ async def _try_display_next_rendered(context, services, lock) -> bool:
 
         # If more rendered images are waiting, use cooldown as next interval
         more = services.database.count_rendered_images(active_orientation)
-        next_interval = cooldown if (more > 0 and cooldown > 0) else services.display.get_slideshow_interval()
+        if more > 0 and cooldown > 0:
+            next_interval = cooldown
+        else:
+            scheduled = _get_scheduled_time(services)
+            next_interval = _seconds_until_time(scheduled) if scheduled else services.display.get_slideshow_interval()
         _reschedule_for(context.application, next_interval)
     else:
         rendered.status = "display_failed"
@@ -239,8 +269,13 @@ async def _advance_slideshow(context) -> None:
 
         if result.success:
             services.database.set_setting("current_image_displayed_at", utcnow_iso())
-            interval = services.display.get_slideshow_interval()
-            _set_next_fire_at(services, interval)
+            scheduled = _get_scheduled_time(services)
+            if scheduled:
+                next_seconds = _seconds_until_time(scheduled)
+                _reschedule_for(context.application, next_seconds)
+            else:
+                interval = services.display.get_slideshow_interval()
+                _set_next_fire_at(services, interval)
             logger.info("Auto-advanced to image %s", target.image_id)
         else:
             logger.warning("Auto-advance failed: %s", result.message)
