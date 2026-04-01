@@ -13,6 +13,7 @@ from app.commands import (
     _delete_page_callback,
     _delete_select_callback,
     cancel_command,
+    command_action_callback,
     delete_command,
     help_command,
     list_command,
@@ -109,6 +110,7 @@ def build_application(services: AppServices) -> Application:
     application.add_handler(CallbackQueryHandler(_delete_confirm_callback, pattern=r"^del\|y\|"))
     application.add_handler(CallbackQueryHandler(_delete_back_callback, pattern=r"^del\|b\|"))
     application.add_handler(CallbackQueryHandler(_delete_cancel_callback, pattern=r"^del\|c$"))
+    application.add_handler(CallbackQueryHandler(command_action_callback, pattern=r"^cmd\|"))
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("restart", restart_command))
     application.add_handler(CommandHandler("update", update_command))

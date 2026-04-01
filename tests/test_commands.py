@@ -10,7 +10,9 @@ from types import SimpleNamespace
 from app.commands import (
     _delete_cancel_callback,
     _delete_confirm_callback,
+    command_action_callback,
     delete_command,
+    help_command,
     list_command,
     next_command,
     prev_command,
@@ -469,6 +471,182 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(services.display.display_calls[-1], "img-previous")
             self.assertEqual(update.effective_message.replies[-1], "Bild 1 von 2: img-previous")
 
+    async def test_help_command_adds_quick_actions_and_admin_settings_button(self) -> None:
+        services = _build_services(Path(tempfile.mkdtemp()), is_admin=True)
+        update = _MessageUpdate(user_id=5)
+        context = _FakeContext(services)
+
+        await help_command(update, context)
+
+        markup = update.effective_message.reply_markups[0]
+        self.assertIsNotNone(markup)
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+        self.assertIn("Status", labels)
+        self.assertIn("Liste", labels)
+        self.assertIn("Löschen", labels)
+        self.assertIn("Einstellungen", labels)
+        self.assertIn("/settings - Anzeigeeinstellungen anzeigen/ändern", update.effective_message.replies[0])
+
+    async def test_status_command_adds_admin_quick_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir), is_admin=True)
+            update = _MessageUpdate(user_id=7)
+            context = _FakeContext(services)
+
+            await status_command(update, context)
+
+            markup = update.effective_message.reply_markups[0]
+            labels = [button.text for row in markup.inline_keyboard for button in row]
+            self.assertIn("Liste", labels)
+            self.assertIn("Vorheriges", labels)
+            self.assertIn("Nächstes", labels)
+            self.assertIn("Löschen", labels)
+            self.assertIn("Einstellungen", labels)
+
+    async def test_list_command_adds_quick_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-1"}),
+                encoding="utf-8",
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-1.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Current",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await list_command(update, context)
+
+            markup = update.effective_message.reply_markups[0]
+            labels = [button.text for row in markup.inline_keyboard for button in row]
+            self.assertIn("Vorheriges", labels)
+            self.assertIn("Nächstes", labels)
+            self.assertIn("Löschen", labels)
+            self.assertIn("Neu laden", labels)
+
+    async def test_command_action_callback_edits_status_message(self) -> None:
+        services = _build_services(Path(tempfile.mkdtemp()), is_admin=True)
+        update = _FakeUpdate(data="cmd|status", has_media=False, user_id=5)
+        context = _FakeContext(services)
+
+        await command_action_callback(update, context)
+
+        self.assertIn("Fotorahmen-Status", update.callback_query.text_edits[0])
+        markup = update.callback_query.text_edit_markups[0]
+        self.assertIsNotNone(markup)
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+        self.assertIn("Einstellungen", labels)
+
+    async def test_command_action_callback_edits_list_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-1"}),
+                encoding="utf-8",
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-1.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Current",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            update = _FakeUpdate(data="cmd|list", has_media=False)
+            context = _FakeContext(services)
+
+            await command_action_callback(update, context)
+
+            self.assertIn("Bilderliste", update.callback_query.text_edits[0])
+            labels = [button.text for row in update.callback_query.text_edit_markups[0].inline_keyboard for button in row]
+            self.assertIn("Neu laden", labels)
+
+    async def test_command_action_callback_runs_next_and_delete_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-current"}),
+                encoding="utf-8",
+            )
+            for image_id in ("img-current", "img-next"):
+                original = tmpdir_path / "incoming" / f"{image_id}.jpg"
+                original.parent.mkdir(parents=True, exist_ok=True)
+                original.write_bytes(image_id.encode("utf-8"))
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-current",
+                    telegram_file_id="file-current",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-current.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Current",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-next",
+                    telegram_file_id="file-next",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-next.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Queued",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:05:00+00:00",
+                    status="rendered",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            next_update = _FakeUpdate(data="cmd|next", has_media=False)
+            delete_update = _FakeUpdate(data="cmd|delete", has_media=False)
+            context = _FakeContext(services, with_job_queue=True)
+
+            await command_action_callback(next_update, context)
+            await command_action_callback(delete_update, context)
+
+            self.assertEqual(services.display.display_calls[-1], "img-next")
+            self.assertEqual(next_update.callback_query.message.replies[-1], "Bild 2 von 2: img-next")
+            self.assertIn("Bilder zum Löschen", delete_update.callback_query.message.replies[-1])
+
 
 class _FakeQueryMessage:
     def __init__(self, *, has_media: bool) -> None:
@@ -476,6 +654,14 @@ class _FakeQueryMessage:
         self.document = None
         self.animation = None
         self.video = None
+        self.replies: list[str] = []
+        self.reply_markups: list[object | None] = []
+        self.chat_id = 111
+        self.message_id = 222
+
+    async def reply_text(self, text: str, **kwargs) -> None:
+        self.replies.append(text)
+        self.reply_markups.append(kwargs.get("reply_markup"))
 
 
 class _FakeCallbackQuery:
@@ -484,34 +670,42 @@ class _FakeCallbackQuery:
         self.message = _FakeQueryMessage(has_media=has_media)
         self.text_edits: list[str] = []
         self.caption_edits: list[str] = []
+        self.text_edit_markups: list[object | None] = []
+        self.caption_edit_markups: list[object | None] = []
 
     async def answer(self) -> None:
         return None
 
-    async def edit_message_text(self, text: str) -> None:
+    async def edit_message_text(self, text: str, reply_markup=None) -> None:
         self.text_edits.append(text)
+        self.text_edit_markups.append(reply_markup)
 
-    async def edit_message_caption(self, *, caption: str) -> None:
+    async def edit_message_caption(self, *, caption: str, reply_markup=None) -> None:
         self.caption_edits.append(caption)
+        self.caption_edit_markups.append(reply_markup)
 
 
 class _FakeUpdate:
-    def __init__(self, *, data: str, has_media: bool) -> None:
+    def __init__(self, *, data: str, has_media: bool, user_id: int = 1) -> None:
         self.callback_query = _FakeCallbackQuery(data=data, has_media=has_media)
+        self.effective_message = self.callback_query.message
+        self.effective_user = SimpleNamespace(id=user_id)
 
 
 class _FakeMessageOnly:
     def __init__(self) -> None:
         self.replies: list[str] = []
+        self.reply_markups: list[object | None] = []
 
     async def reply_text(self, text: str, **kwargs) -> None:
         self.replies.append(text)
+        self.reply_markups.append(kwargs.get("reply_markup"))
 
 
 class _MessageUpdate:
-    def __init__(self) -> None:
+    def __init__(self, *, user_id: int = 1) -> None:
         self.effective_message = _FakeMessageOnly()
-        self.effective_user = SimpleNamespace(id=1)
+        self.effective_user = SimpleNamespace(id=user_id)
 
 
 class _FakeContext:
@@ -550,11 +744,17 @@ class _FakeDisplay:
 
 
 class _FakeAuth:
+    def __init__(self, *, is_admin: bool = False) -> None:
+        self._is_admin = is_admin
+
     def sync_user(self, user) -> None:
         return None
 
     def is_whitelisted(self, user_id: int) -> bool:
         return True
+
+    def is_admin(self, user_id: int) -> bool:
+        return self._is_admin
 
 
 class _FakeJob:
@@ -574,11 +774,11 @@ class _FakeJobQueue:
         return _FakeJob()
 
 
-def _build_services(base_dir: Path):
+def _build_services(base_dir: Path, *, is_admin: bool = False):
     database = Database(base_dir / "photo_frame.db")
     database.initialize()
     return SimpleNamespace(
-        auth=_FakeAuth(),
+        auth=_FakeAuth(is_admin=is_admin),
         database=database,
         display=_FakeDisplay(),
         storage=SimpleNamespace(

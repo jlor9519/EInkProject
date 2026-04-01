@@ -6,16 +6,17 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 
 from app.auth import require_admin
-from app.commands import _display_target, get_display_lock, get_services
+from app.commands import _display_target, _edit_query_message, get_display_lock, get_services
 from app.database import utcnow_iso
 from app.orientation import format_orientation_label, normalize_orientation_value
 
 WAITING_FOR_SETTINGS_CHOICE, WAITING_FOR_SETTINGS_VALUE = range(10, 12)
 PENDING_SETTINGS_KEY = "pending_settings_choice"
+SETTINGS_CALLBACK_PREFIX = "settings|"
 
 
 @dataclass(slots=True)
@@ -145,12 +146,184 @@ def _get_current_value(settings: dict[str, Any], s: _SettingDef) -> str:
     return str(settings.get(s.key, "?"))
 
 
-def _format_settings_list(settings: dict[str, Any]) -> str:
-    lines = ["Aktuelle Einstellungen:", ""]
+def _settings_callback_data(*parts: object) -> str:
+    return f"{SETTINGS_CALLBACK_PREFIX}{'|'.join(str(part) for part in parts)}"
+
+
+def _load_settings_snapshot(services) -> dict[str, Any]:
+    device_settings = services.display.read_device_settings()
+    device_settings["image_fit_mode"] = services.database.get_setting("image_fit_mode") or "fill"
+    device_settings["slideshow_interval"] = services.display.get_slideshow_interval()
+    cooldown_raw = services.database.get_setting("new_image_cooldown")
+    device_settings["new_image_cooldown"] = int(cooldown_raw) if cooldown_raw is not None else 3600
+    schedule = services.display.get_sleep_schedule()
+    device_settings["sleep_schedule"] = f"{schedule[0]}–{schedule[1]}" if schedule else ""
+    device_settings["scheduled_change_time"] = services.database.get_setting("scheduled_change_time") or ""
+    return device_settings
+
+
+def _format_settings_list(settings: dict[str, Any], notice: str | None = None) -> str:
+    lines: list[str] = []
+    if notice:
+        lines.extend([notice, ""])
+    lines.extend(["Aktuelle Einstellungen:", ""])
     for i, s in enumerate(_SETTINGS, 1):
         lines.append(f"{i}. {s.label}: {_get_current_value(settings, s)}")
     lines.append("")
-    lines.append("Welche Einstellung möchtest du ändern? Antworte mit der Nummer oder /cancel.")
+    lines.append("Wähle eine Einstellung per Button oder nutze /cancel.")
+    return "\n".join(lines)
+
+
+def _settings_menu_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton("1. Sättigung", callback_data=_settings_callback_data("select", 0)),
+            InlineKeyboardButton("2. Kontrast", callback_data=_settings_callback_data("select", 1)),
+        ],
+        [
+            InlineKeyboardButton("3. Schärfe", callback_data=_settings_callback_data("select", 2)),
+            InlineKeyboardButton("4. Helligkeit", callback_data=_settings_callback_data("select", 3)),
+        ],
+        [
+            InlineKeyboardButton("5. Ausrichtung", callback_data=_settings_callback_data("select", 4)),
+            InlineKeyboardButton("6. Bildanpassung", callback_data=_settings_callback_data("select", 5)),
+        ],
+        [
+            InlineKeyboardButton("7. Anzeigedauer", callback_data=_settings_callback_data("select", 6)),
+            InlineKeyboardButton("8. Ruhezeit", callback_data=_settings_callback_data("select", 7)),
+        ],
+        [
+            InlineKeyboardButton("9. Neue Bilder", callback_data=_settings_callback_data("select", 8)),
+            InlineKeyboardButton("10. Täglicher Wechsel", callback_data=_settings_callback_data("select", 9)),
+        ],
+        [InlineKeyboardButton("Schließen", callback_data=_settings_callback_data("close"))],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _settings_prompt_keyboard(idx: int, s: _SettingDef) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if s.kind == "orientation":
+        rows.append(
+            [
+                InlineKeyboardButton("Hochformat", callback_data=_settings_callback_data("apply", idx, "vertical")),
+                InlineKeyboardButton("Querformat", callback_data=_settings_callback_data("apply", idx, "horizontal")),
+            ]
+        )
+    elif s.kind == "fit_mode":
+        rows.append(
+            [
+                InlineKeyboardButton("Zuschneiden", callback_data=_settings_callback_data("apply", idx, "fill")),
+                InlineKeyboardButton("Einpassen", callback_data=_settings_callback_data("apply", idx, "contain")),
+            ]
+        )
+    elif s.kind in {"sleep_schedule", "scheduled_time"}:
+        rows.append([InlineKeyboardButton("Deaktivieren", callback_data=_settings_callback_data("disable", idx))])
+
+    rows.append(
+        [
+            InlineKeyboardButton("Zurück", callback_data=_settings_callback_data("back")),
+            InlineKeyboardButton("Schließen", callback_data=_settings_callback_data("close")),
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+def _prompt_text_for_setting(services, idx: int, notice: str | None = None) -> str:
+    s = _SETTINGS[idx]
+    if s.kind == "cooldown":
+        cooldown_raw = services.database.get_setting("new_image_cooldown")
+        cooldown_val = int(cooldown_raw) if cooldown_raw is not None else 3600
+        current = "Deaktiviert" if cooldown_val == 0 else _format_interval_label(cooldown_val)
+    elif s.kind == "fit_mode":
+        current_raw = services.database.get_setting("image_fit_mode") or "fill"
+        current = _FIT_MODE_LABELS.get(current_raw, current_raw)
+    elif s.kind == "integer":
+        current = services.database.get_setting(s.key) or "50"
+    elif s.kind == "interval":
+        raw_seconds = services.display.get_slideshow_interval()
+        current = _format_interval_label(raw_seconds)
+    elif s.kind == "sleep_schedule":
+        sleep_sched = services.display.get_sleep_schedule()
+        current = f"{sleep_sched[0]}–{sleep_sched[1]}" if sleep_sched else "Keine"
+    elif s.kind == "scheduled_time":
+        raw = services.database.get_setting("scheduled_change_time")
+        current = str(raw) if raw else "Deaktiviert"
+    else:
+        current = _get_current_value(services.display.read_device_settings(), s)
+
+    lines: list[str] = []
+    if notice:
+        lines.extend([notice, ""])
+
+    if s.kind == "cooldown":
+        lines.extend(
+            [
+                f"Aktueller Wert für {s.label}: {current}",
+                "",
+                "Wie lange soll ein neues Bild mindestens angezeigt werden, bevor das nächste neue Bild erscheint?",
+                "Beispiele: 30m, 1h, 2h, 6h",
+                "0 = deaktiviert (jedes neue Bild wird sofort angezeigt)",
+                "(Maximum 24 Stunden)",
+            ]
+        )
+    elif s.kind == "orientation":
+        lines.extend(
+            [
+                f"Aktueller Wert für {s.label}: {current}",
+                "Wähle den neuen Wert per Button.",
+            ]
+        )
+    elif s.kind == "fit_mode":
+        lines.extend(
+            [
+                f"Aktueller Wert für {s.label}: {current}",
+                "",
+                "Zuschneiden — Bild wird auf den Rahmen zugeschnitten (Ränder werden ggf. abgeschnitten)",
+                "Einpassen — Bild wird vollständig angezeigt (unscharfer Hintergrund füllt die Ränder)",
+                "",
+                "Wähle den neuen Wert per Button.",
+            ]
+        )
+    elif s.kind == "interval":
+        lines.extend(
+            [
+                f"Aktueller Wert für {s.label}: {current}",
+                "",
+                "Wie lange soll jedes Bild angezeigt werden?",
+                "Beispiele: 30m, 1h, 2h, 6h, 1d",
+                "(Minimum 5 Minuten, Maximum 7 Tage)",
+            ]
+        )
+    elif s.kind == "sleep_schedule":
+        lines.extend(
+            [
+                f"Aktueller Wert für {s.label}: {current}",
+                "",
+                "Gib die Ruhezeit im Format HH:MM-HH:MM ein (z.B. 22:00-08:00).",
+                "Das Display wechselt das Bild in dieser Zeit nicht.",
+                "",
+                "Oder deaktiviere die Ruhezeit per Button.",
+            ]
+        )
+    elif s.kind == "scheduled_time":
+        lines.extend(
+            [
+                f"Aktueller Wert für {s.label}: {current}",
+                "",
+                "Gib die Uhrzeit ein, zu der täglich ein neues Bild angezeigt werden soll (z.B. 8:00, 08:30).",
+                "Wenn aktiv, wird der Bildwechsel genau zu dieser Zeit ausgelöst — unabhängig von der Anzeigedauer.",
+                "",
+                "Oder deaktiviere den täglichen Bildwechsel per Button.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"Aktueller Wert für {s.label}: {current}",
+                "Gib den neuen Wert ein (z.B. 1.0, 1.4, 2.0):",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -208,24 +381,120 @@ async def _switch_orientation_library(context: ContextTypes.DEFAULT_TYPE, orient
 
 @require_admin
 async def settings_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await _show_settings_menu(update, context)
+
+
+async def _respond_settings_message(
+    update: Update,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    query = update.callback_query
+    if query is not None:
+        await _edit_query_message(query, text, reply_markup=reply_markup)
+        return
+    if update.effective_message is not None:
+        await update.effective_message.reply_text(text, reply_markup=reply_markup)
+
+
+async def _show_settings_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    notice: str | None = None,
+) -> int:
     services = get_services(context)
-    if update.effective_message is None:
-        return ConversationHandler.END
+    context.user_data.pop(PENDING_SETTINGS_KEY, None)
     try:
-        device_settings = services.display.read_device_settings()
+        snapshot = _load_settings_snapshot(services)
     except Exception as exc:
         logger.exception("Failed to read device settings")
-        await update.effective_message.reply_text(f"Fehler beim Lesen der Einstellungen: {exc}")
+        await _respond_settings_message(update, f"Fehler beim Lesen der Einstellungen: {exc}")
         return ConversationHandler.END
-    # Inject database-stored settings for display
-    device_settings["image_fit_mode"] = services.database.get_setting("image_fit_mode") or "fill"
-    device_settings["slideshow_interval"] = services.display.get_slideshow_interval()
-    cooldown_raw = services.database.get_setting("new_image_cooldown")
-    device_settings["new_image_cooldown"] = int(cooldown_raw) if cooldown_raw is not None else 3600
-    schedule = services.display.get_sleep_schedule()
-    device_settings["sleep_schedule"] = f"{schedule[0]}–{schedule[1]}" if schedule else ""
-    device_settings["scheduled_change_time"] = services.database.get_setting("scheduled_change_time") or ""
-    await update.effective_message.reply_text(_format_settings_list(device_settings))
+    await _respond_settings_message(
+        update,
+        _format_settings_list(snapshot, notice),
+        reply_markup=_settings_menu_keyboard(),
+    )
+    return WAITING_FOR_SETTINGS_CHOICE
+
+
+async def _show_setting_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    idx: int,
+    *,
+    notice: str | None = None,
+) -> int:
+    services = get_services(context)
+    context.user_data[PENDING_SETTINGS_KEY] = idx
+    await _respond_settings_message(
+        update,
+        _prompt_text_for_setting(services, idx, notice),
+        reply_markup=_settings_prompt_keyboard(idx, _SETTINGS[idx]),
+    )
+    return WAITING_FOR_SETTINGS_VALUE
+
+
+async def _authorize_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None:
+        return False
+
+    await query.answer()
+    if user is None:
+        return False
+
+    services = get_services(context)
+    services.auth.sync_user(user)
+    if not services.auth.is_admin(user.id):
+        await _edit_query_message(query, "Dieser Befehl ist nur für Admins verfügbar.")
+        return False
+    return True
+
+
+async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await _authorize_settings_callback(update, context):
+        return ConversationHandler.END
+
+    parts = (update.callback_query.data or "").split("|")
+    action = parts[1] if len(parts) > 1 else ""
+    if action in {"open", "menu"}:
+        return await _show_settings_menu(update, context)
+    if action == "close":
+        context.user_data.pop(PENDING_SETTINGS_KEY, None)
+        await _respond_settings_message(update, "Einstellungs-Menü geschlossen.")
+        return ConversationHandler.END
+    if action == "back":
+        return await _show_settings_menu(update, context)
+    if action == "select" and len(parts) > 2:
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await _respond_settings_message(update, "Unbekannte Einstellung.")
+            return WAITING_FOR_SETTINGS_CHOICE
+        if idx < 0 or idx >= len(_SETTINGS):
+            await _respond_settings_message(update, "Unbekannte Einstellung.")
+            return WAITING_FOR_SETTINGS_CHOICE
+        return await _show_setting_prompt(update, context, idx)
+    if action == "apply" and len(parts) > 3:
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await _respond_settings_message(update, "Unbekannte Einstellung.")
+            return WAITING_FOR_SETTINGS_CHOICE
+        return await _apply_setting_value(update, context, idx, parts[3])
+    if action == "disable" and len(parts) > 2:
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await _respond_settings_message(update, "Unbekannte Einstellung.")
+            return WAITING_FOR_SETTINGS_CHOICE
+        return await _apply_setting_value(update, context, idx, "keine")
+
+    await _respond_settings_message(update, "Unbekannte Auswahl.")
     return WAITING_FOR_SETTINGS_CHOICE
 
 
@@ -246,78 +515,7 @@ async def receive_settings_choice(update: Update, context: ContextTypes.DEFAULT_
         )
         return WAITING_FOR_SETTINGS_CHOICE
 
-    s = _SETTINGS[choice - 1]
-    context.user_data[PENDING_SETTINGS_KEY] = choice - 1
-
-    services = get_services(context)
-    if s.kind == "cooldown":
-        cooldown_raw = services.database.get_setting("new_image_cooldown")
-        cooldown_val = int(cooldown_raw) if cooldown_raw is not None else 3600
-        current = "Deaktiviert" if cooldown_val == 0 else _format_interval_label(cooldown_val)
-    elif s.kind == "fit_mode":
-        current_raw = services.database.get_setting("image_fit_mode") or "fill"
-        current = _FIT_MODE_LABELS.get(current_raw, current_raw)
-    elif s.kind == "integer":
-        current = services.database.get_setting(s.key) or "50"
-    elif s.kind == "interval":
-        raw_seconds = services.display.get_slideshow_interval()
-        current = _format_interval_label(raw_seconds)
-    elif s.kind == "sleep_schedule":
-        sleep_sched = services.display.get_sleep_schedule()
-        current = f"{sleep_sched[0]}–{sleep_sched[1]}" if sleep_sched else "Keine"
-    elif s.kind == "scheduled_time":
-        raw = services.database.get_setting("scheduled_change_time")
-        current = str(raw) if raw else "Deaktiviert"
-    else:
-        current = _get_current_value(services.display.read_device_settings(), s)
-
-    if s.kind == "cooldown":
-        await update.effective_message.reply_text(
-            f"Aktueller Wert für {s.label}: {current}\n\n"
-            "Wie lange soll ein neues Bild mindestens angezeigt werden, bevor das nächste neue Bild erscheint?\n"
-            "Beispiele: 30m, 1h, 2h, 6h\n"
-            "0 = deaktiviert (jedes neue Bild wird sofort angezeigt)\n"
-            "(Maximum 24 Stunden)"
-        )
-    elif s.kind == "orientation":
-        await update.effective_message.reply_text(
-            f"Aktueller Wert für {s.label}: {current}\n"
-            "Gib den neuen Wert ein: Hochformat oder Querformat."
-        )
-    elif s.kind == "fit_mode":
-        await update.effective_message.reply_text(
-            f"Aktueller Wert für {s.label}: {current}\n\n"
-            "Zuschneiden — Bild wird auf den Rahmen zugeschnitten (Ränder werden ggf. abgeschnitten)\n"
-            "Einpassen — Bild wird vollständig angezeigt (unscharfer Hintergrund füllt die Ränder)\n\n"
-            "Gib den neuen Wert ein: Zuschneiden oder Einpassen."
-        )
-    elif s.kind == "interval":
-        await update.effective_message.reply_text(
-            f"Aktueller Wert für {s.label}: {current}\n\n"
-            "Wie lange soll jedes Bild angezeigt werden?\n"
-            "Beispiele: 30m, 1h, 2h, 6h, 1d\n"
-            "(Minimum 5 Minuten, Maximum 7 Tage)"
-        )
-    elif s.kind == "sleep_schedule":
-        await update.effective_message.reply_text(
-            f"Aktueller Wert für {s.label}: {current}\n\n"
-            "Gib die Ruhezeit im Format HH:MM-HH:MM ein (z.B. 22:00-08:00).\n"
-            "Das Display wechselt das Bild in dieser Zeit nicht.\n\n"
-            "Oder gib \"keine\" ein, um die Ruhezeit zu deaktivieren."
-        )
-    elif s.kind == "scheduled_time":
-        await update.effective_message.reply_text(
-            f"Aktueller Wert für {s.label}: {current}\n\n"
-            "Gib die Uhrzeit ein, zu der täglich ein neues Bild angezeigt werden soll (z.B. 8:00, 08:30).\n"
-            "Wenn aktiv, wird der Bildwechsel genau zu dieser Zeit ausgelöst — unabhängig von der Anzeigedauer.\n\n"
-            "Oder gib \"keine\" ein, um den täglichen Bildwechsel zu deaktivieren."
-        )
-    else:
-        await update.effective_message.reply_text(
-            f"Aktueller Wert für {s.label}: {current}\n"
-            "Gib den neuen Wert ein (z.B. 1.0, 1.4, 2.0):"
-        )
-    return WAITING_FOR_SETTINGS_VALUE
+    return await _show_setting_prompt(update, context, choice - 1)
 
 
 async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -325,10 +523,18 @@ async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
     idx = context.user_data.pop(PENDING_SETTINGS_KEY, None)
     if idx is None:
-        return ConversationHandler.END
+        return WAITING_FOR_SETTINGS_CHOICE
+    return await _apply_setting_value(update, context, idx, update.effective_message.text or "")
 
+
+async def _apply_setting_value(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    idx: int,
+    raw_text: str,
+) -> int:
     s = _SETTINGS[idx]
-    text = (update.effective_message.text or "").strip().lower()
+    text = raw_text.strip().lower()
     services = get_services(context)
 
     if s.kind == "cooldown":
@@ -337,30 +543,32 @@ async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_T
         else:
             seconds = _parse_interval_input(text)
         if seconds is None:
-            await update.effective_message.reply_text(
-                "Ungültiges Format. Beispiele: 30m, 1h, 2h, 0 — oder nutze /cancel."
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Ungültiges Format. Beispiele: 30m, 1h, 2h, 0 — oder nutze /cancel.",
             )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
         if seconds < 0 or seconds > 86400:
-            await update.effective_message.reply_text(
-                "Der Wert muss zwischen 0 und 24 Stunden liegen. Bitte erneut eingeben oder /cancel."
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Der Wert muss zwischen 0 und 24 Stunden liegen. Bitte erneut eingeben oder /cancel.",
             )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
         services.database.set_setting("new_image_cooldown", str(seconds))
         label = "Deaktiviert" if seconds == 0 else _format_interval_label(seconds)
-        await update.effective_message.reply_text(f"{s.label} ist jetzt {label}.")
-        return ConversationHandler.END
+        return await _show_settings_menu(update, context, notice=f"{s.label} ist jetzt {label}.")
 
     if s.kind == "orientation":
         orientation = normalize_orientation_value(text)
         if orientation is None:
-            await update.effective_message.reply_text(
-                "Ungültiger Wert. Bitte gib Hochformat oder Querformat ein, oder nutze /cancel."
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Ungültiger Wert. Bitte gib Hochformat oder Querformat ein, oder nutze /cancel.",
             )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
         updates = {
             "orientation": orientation,
             "inverted_image": orientation == "vertical",
@@ -369,122 +577,133 @@ async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_T
             result = services.display.apply_device_settings(updates, refresh_current=False)
         except Exception as exc:
             logger.exception("Failed to write orientation settings")
-            await update.effective_message.reply_text(f"Fehler beim Speichern der Einstellungen: {exc}")
-            return ConversationHandler.END
+            await _respond_settings_message(update, f"Fehler beim Speichern der Einstellungen: {exc}")
+            return WAITING_FOR_SETTINGS_VALUE
 
         orientation_label = format_orientation_label(orientation)
         path_note = f" (device.json: {result.device_config_path})" if result.device_config_path else ""
         if not result.success:
-            await update.effective_message.reply_text(
-                f"{s.label} wurde als {orientation_label} gespeichert{path_note}.\n{result.message}"
+            return await _show_settings_menu(
+                update,
+                context,
+                notice=f"{s.label} wurde als {orientation_label} gespeichert{path_note}.\n{result.message}",
             )
-            return ConversationHandler.END
 
-        switched, switch_message = await _switch_orientation_library(context, orientation)
-        await update.effective_message.reply_text(
-            f"{s.label} ist jetzt {orientation_label}{path_note}.\n{switch_message}\n{result.message}"
+        _, switch_message = await _switch_orientation_library(context, orientation)
+        return await _show_settings_menu(
+            update,
+            context,
+            notice=f"{s.label} ist jetzt {orientation_label}{path_note}.\n{switch_message}\n{result.message}",
         )
-        return ConversationHandler.END
-    elif s.kind == "fit_mode":
+
+    if s.kind == "fit_mode":
         normalized = " ".join(text.split())
         fit_mode = _FIT_MODE_MAP.get(normalized)
         if fit_mode is None:
-            await update.effective_message.reply_text(
-                "Ungültiger Wert. Bitte gib Zuschneiden oder Einpassen ein, oder nutze /cancel."
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Ungültiger Wert. Bitte gib Zuschneiden oder Einpassen ein, oder nutze /cancel.",
             )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
         services.database.set_setting("image_fit_mode", fit_mode)
         label = _FIT_MODE_LABELS.get(fit_mode, fit_mode)
-        await update.effective_message.reply_text(f"{s.label} ist jetzt {label}.")
-        return ConversationHandler.END
-    elif s.kind == "integer":
+        return await _show_settings_menu(update, context, notice=f"{s.label} ist jetzt {label}.")
+
+    if s.kind == "integer":
         try:
             int_value = int(text.replace(",", ""))
         except ValueError:
-            await update.effective_message.reply_text(
-                "Ungültiger Wert. Bitte gib eine ganze Zahl ein, oder nutze /cancel."
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Ungültiger Wert. Bitte gib eine ganze Zahl ein, oder nutze /cancel.",
             )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
         if int_value < 5 or int_value > 500:
-            await update.effective_message.reply_text(
-                "Der Wert muss zwischen 5 und 500 liegen. Bitte erneut eingeben oder /cancel."
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Der Wert muss zwischen 5 und 500 liegen. Bitte erneut eingeben oder /cancel.",
             )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
         services.database.set_setting(s.key, str(int_value))
-        await update.effective_message.reply_text(f"{s.label} ist jetzt {int_value} Bilder.")
-        return ConversationHandler.END
-    elif s.kind == "sleep_schedule":
-        if text in ("keine", "kein", "no", "off", "deaktivieren"):
+        return await _show_settings_menu(update, context, notice=f"{s.label} ist jetzt {int_value} Bilder.")
+
+    if s.kind == "sleep_schedule":
+        if text in ("keine", "kein", "no", "off", "deaktivieren", "deaktiviert"):
             try:
                 result = services.display.set_sleep_schedule(None, None)
             except Exception as exc:
                 logger.exception("Failed to disable sleep schedule")
-                await update.effective_message.reply_text(f"Fehler beim Speichern: {exc}")
-                return ConversationHandler.END
+                await _respond_settings_message(update, f"Fehler beim Speichern: {exc}")
+                return WAITING_FOR_SETTINGS_VALUE
             status = "Ruhezeit ist deaktiviert" if result.success else "Ruhezeit wurde deaktiviert"
-            await update.effective_message.reply_text(f"{status}.\n{result.message}")
-            return ConversationHandler.END
-        # Expect HH:MM-HH:MM (en-dash or hyphen)
-        raw = text.replace("–", "-").replace("—", "-")
-        parts = raw.split("-", 1)
+            return await _show_settings_menu(update, context, notice=f"{status}.\n{result.message}")
+
+        normalized = text.replace("–", "-").replace("—", "-")
+        parts = normalized.split("-", 1)
         if len(parts) != 2:
-            await update.effective_message.reply_text(
-                "Ungültiges Format. Bitte im Format HH:MM-HH:MM eingeben (z.B. 22:00-08:00), oder /cancel."
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Ungültiges Format. Bitte im Format HH:MM-HH:MM eingeben (z.B. 22:00-08:00), oder /cancel.",
             )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
         sleep_start = _parse_time_string(parts[0])
         wake_up = _parse_time_string(parts[1])
         if sleep_start is None or wake_up is None:
-            await update.effective_message.reply_text(
-                "Ungültige Uhrzeit. Bitte im Format HH:MM-HH:MM eingeben (z.B. 22:00-08:00), oder /cancel."
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Ungültige Uhrzeit. Bitte im Format HH:MM-HH:MM eingeben (z.B. 22:00-08:00), oder /cancel.",
             )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
         if sleep_start == wake_up:
-            await update.effective_message.reply_text(
-                "Schlaf- und Aufwachzeit dürfen nicht gleich sein. Bitte erneut eingeben oder /cancel."
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Schlaf- und Aufwachzeit dürfen nicht gleich sein. Bitte erneut eingeben oder /cancel.",
             )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
         try:
             result = services.display.set_sleep_schedule(sleep_start, wake_up)
         except Exception as exc:
             logger.exception("Failed to set sleep schedule")
-            await update.effective_message.reply_text(f"Fehler beim Speichern: {exc}")
-            return ConversationHandler.END
+            await _respond_settings_message(update, f"Fehler beim Speichern: {exc}")
+            return WAITING_FOR_SETTINGS_VALUE
         if result.success:
             status = f"Ruhezeit ist jetzt {sleep_start}–{wake_up}. Das Display wechselt das Bild in dieser Zeit nicht"
         else:
             status = f"Ruhezeit wurde als {sleep_start}–{wake_up} gespeichert"
-        await update.effective_message.reply_text(f"{status}.\n{result.message}")
-        return ConversationHandler.END
-    elif s.kind == "interval":
+        return await _show_settings_menu(update, context, notice=f"{status}.\n{result.message}")
+
+    if s.kind == "interval":
         seconds = _parse_interval_input(text)
         if seconds is None:
-            await update.effective_message.reply_text(
-                "Ungültiges Format. Beispiele: 30m, 1h, 2h, 1d — oder nutze /cancel."
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Ungültiges Format. Beispiele: 30m, 1h, 2h, 1d — oder nutze /cancel.",
             )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
         if seconds < _INTERVAL_MIN or seconds > _INTERVAL_MAX:
-            await update.effective_message.reply_text(
-                f"Der Wert muss zwischen 5 Minuten und 7 Tagen liegen. Bitte erneut eingeben oder /cancel."
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Der Wert muss zwischen 5 Minuten und 7 Tagen liegen. Bitte erneut eingeben oder /cancel.",
             )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
         try:
             result = services.display.set_slideshow_interval(seconds)
         except Exception as exc:
             logger.exception("Failed to set slideshow interval")
-            await update.effective_message.reply_text(f"Fehler beim Speichern: {exc}")
-            return ConversationHandler.END
+            await _respond_settings_message(update, f"Fehler beim Speichern: {exc}")
+            return WAITING_FOR_SETTINGS_VALUE
         label = _format_interval_label(seconds)
         status = f"{s.label} ist jetzt {label}" if result.success else f"{s.label} wurde als {label} gespeichert"
         from app.slideshow import reschedule_slideshow_job
+
         reschedule_slideshow_job(context.application, interval_seconds=seconds)
         scheduled = services.database.get_setting("scheduled_change_time") or ""
         note = (
@@ -492,54 +711,65 @@ async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_T
             if not scheduled
             else f"\nHinweis: Täglicher Bildwechsel um {scheduled} ist aktiv und überschreibt diese Anzeigedauer momentan."
         )
-        await update.effective_message.reply_text(f"{status}.{note}\n{result.message}")
-        return ConversationHandler.END
-    elif s.kind == "scheduled_time":
+        return await _show_settings_menu(update, context, notice=f"{status}.{note}\n{result.message}")
+
+    if s.kind == "scheduled_time":
         if text in ("keine", "kein", "no", "off", "deaktivieren", "deaktiviert"):
             services.database.set_setting("scheduled_change_time", "")
-            await update.effective_message.reply_text("Täglicher Bildwechsel ist deaktiviert. Die Anzeigedauer-Einstellung wird wieder verwendet.")
             from app.slideshow import reschedule_slideshow_job
+
             reschedule_slideshow_job(context.application)
-            return ConversationHandler.END
+            return await _show_settings_menu(
+                update,
+                context,
+                notice="Täglicher Bildwechsel ist deaktiviert. Die Anzeigedauer-Einstellung wird wieder verwendet.",
+            )
         time_str = _parse_time_string(text)
         if time_str is None:
-            await update.effective_message.reply_text(
-                "Ungültige Uhrzeit. Bitte im Format HH:MM eingeben (z.B. 08:00, 8:30), oder /cancel."
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Ungültige Uhrzeit. Bitte im Format HH:MM eingeben (z.B. 08:00, 8:30), oder /cancel.",
             )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
         services.database.set_setting("scheduled_change_time", time_str)
-        await update.effective_message.reply_text(
-            f"Täglicher Bildwechsel ist jetzt um {time_str} Uhr. Die Anzeigedauer-Einstellung wird ignoriert, solange dieser Wert aktiv ist."
-        )
         from app.slideshow import reschedule_slideshow_job
+
         reschedule_slideshow_job(context.application)
-        return ConversationHandler.END
-    else:
-        try:
-            value = float(text.replace(",", "."))
-        except ValueError:
-            await update.effective_message.reply_text(
-                "Ungültiger Wert. Bitte gib eine Zahl ein (z.B. 1.0), oder nutze /cancel."
-            )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
-        if value < 0.1 or value > 3.0:
-            await update.effective_message.reply_text(
-                "Der Wert muss zwischen 0.1 und 3.0 liegen. Bitte erneut eingeben oder /cancel."
-            )
-            context.user_data[PENDING_SETTINGS_KEY] = idx
-            return WAITING_FOR_SETTINGS_VALUE
+        return await _show_settings_menu(
+            update,
+            context,
+            notice=(
+                f"Täglicher Bildwechsel ist jetzt um {time_str} Uhr. "
+                "Die Anzeigedauer-Einstellung wird ignoriert, solange dieser Wert aktiv ist."
+            ),
+        )
 
-        updates = {"image_settings": {str(s.subkey): value}}
-        requested_value = value
+    try:
+        value = float(text.replace(",", "."))
+    except ValueError:
+        return await _show_setting_prompt(
+            update,
+            context,
+            idx,
+            notice="Ungültiger Wert. Bitte gib eine Zahl ein (z.B. 1.0), oder nutze /cancel.",
+        )
+    if value < 0.1 or value > 3.0:
+        return await _show_setting_prompt(
+            update,
+            context,
+            idx,
+            notice="Der Wert muss zwischen 0.1 und 3.0 liegen. Bitte erneut eingeben oder /cancel.",
+        )
 
+    updates = {"image_settings": {str(s.subkey): value}}
+    requested_value = value
     try:
         result = services.display.apply_device_settings(updates, refresh_current=True)
     except Exception as exc:
         logger.exception("Failed to write device settings")
-        await update.effective_message.reply_text(f"Fehler beim Speichern der Einstellungen: {exc}")
-        return ConversationHandler.END
+        await _respond_settings_message(update, f"Fehler beim Speichern der Einstellungen: {exc}")
+        return WAITING_FOR_SETTINGS_VALUE
 
     confirmed_value = _get_current_value(result.confirmed_settings, s) if result.confirmed_settings else str(requested_value)
     path_note = f" (device.json: {result.device_config_path})" if result.device_config_path else ""
@@ -548,14 +778,16 @@ async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_T
         if result.success
         else f"{s.label} wurde als {confirmed_value} gespeichert"
     )
-    await update.effective_message.reply_text(f"{status_prefix}{path_note}.\n{result.message}")
-    return ConversationHandler.END
+    return await _show_settings_menu(update, context, notice=f"{status_prefix}{path_note}.\n{result.message}")
 
 
 async def _settings_unexpected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     state = context.user_data.get(PENDING_SETTINGS_KEY)
     if update.effective_message is not None:
-        await update.effective_message.reply_text("Bitte beantworte die aktuelle Frage oder nutze /cancel.")
+        if state is None:
+            await update.effective_message.reply_text("Bitte nutze die Buttons im Einstellungs-Menü oder /cancel.")
+        else:
+            await update.effective_message.reply_text("Bitte beantworte die aktuelle Frage, nutze die Buttons oder /cancel.")
     return WAITING_FOR_SETTINGS_VALUE if state is not None else WAITING_FOR_SETTINGS_CHOICE
 
 
@@ -571,19 +803,24 @@ async def _settings_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def settings_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop(PENDING_SETTINGS_KEY, None)
     if update.effective_message is not None:
-        await update.effective_message.reply_text("Einstellungs-Änderung abgebrochen.")
+        await update.effective_message.reply_text("Einstellungs-Menü geschlossen.")
     return ConversationHandler.END
 
 
 def build_settings_conversation() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[CommandHandler("settings", settings_entry)],
+        entry_points=[
+            CommandHandler("settings", settings_entry),
+            CallbackQueryHandler(settings_callback, pattern=r"^settings\|open$"),
+        ],
         states={
             WAITING_FOR_SETTINGS_CHOICE: [
+                CallbackQueryHandler(settings_callback, pattern=r"^settings\|"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_settings_choice),
                 MessageHandler(filters.ALL & ~filters.COMMAND, _settings_unexpected),
             ],
             WAITING_FOR_SETTINGS_VALUE: [
+                CallbackQueryHandler(settings_callback, pattern=r"^settings\|"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_settings_value),
                 MessageHandler(filters.ALL & ~filters.COMMAND, _settings_unexpected),
             ],

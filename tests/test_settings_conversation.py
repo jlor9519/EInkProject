@@ -16,6 +16,7 @@ from app.settings_conversation import (
     WAITING_FOR_SETTINGS_CHOICE,
     WAITING_FOR_SETTINGS_VALUE,
     receive_settings_value,
+    settings_callback,
     settings_entry,
 )
 
@@ -48,6 +49,49 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("5. Ausrichtung: Hochformat", reply)
         self.assertIn("6. Bildanpassung", reply)
         self.assertIn("10. Täglicher Bildwechsel", reply)
+        markup = update.effective_message.reply_markups[0]
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+        self.assertIn("5. Ausrichtung", labels)
+        self.assertIn("Schließen", labels)
+
+    async def test_settings_callback_opens_prompt_from_button(self) -> None:
+        services = _FakeServices(is_admin=True)
+        update = _FakeCallbackUpdate("settings|select|4", user_id=11)
+        context = _FakeContext(services)
+
+        result = await settings_callback(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_VALUE)
+        self.assertEqual(context.user_data[PENDING_SETTINGS_KEY], 4)
+        self.assertIn("Wähle den neuen Wert per Button.", update.callback_query.text_edits[0])
+        labels = [button.text for row in update.callback_query.text_edit_markups[0].inline_keyboard for button in row]
+        self.assertIn("Hochformat", labels)
+        self.assertIn("Querformat", labels)
+        self.assertIn("Zurück", labels)
+
+    async def test_settings_callback_back_returns_to_menu(self) -> None:
+        services = _FakeServices(is_admin=True)
+        update = _FakeCallbackUpdate("settings|back", user_id=11)
+        context = _FakeContext(services)
+        context.user_data[PENDING_SETTINGS_KEY] = 4
+
+        result = await settings_callback(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
+        self.assertNotIn(PENDING_SETTINGS_KEY, context.user_data)
+        self.assertIn("Aktuelle Einstellungen:", update.callback_query.text_edits[0])
+
+    async def test_settings_callback_close_ends_conversation(self) -> None:
+        services = _FakeServices(is_admin=True)
+        update = _FakeCallbackUpdate("settings|close", user_id=11)
+        context = _FakeContext(services)
+        context.user_data[PENDING_SETTINGS_KEY] = 4
+
+        result = await settings_callback(update, context)
+
+        self.assertEqual(result, ConversationHandler.END)
+        self.assertNotIn(PENDING_SETTINGS_KEY, context.user_data)
+        self.assertEqual(update.callback_query.text_edits[0], "Einstellungs-Menü geschlossen.")
 
     async def test_scheduled_time_setting_can_be_set_and_cleared(self) -> None:
         services = _FakeServices(is_admin=True)
@@ -59,7 +103,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
 
         result = await receive_settings_value(update, context)
 
-        self.assertEqual(result, ConversationHandler.END)
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         self.assertEqual(services.database.get_setting("scheduled_change_time"), "08:00")
         self.assertIn("08:00", update.effective_message.replies[0])
 
@@ -73,7 +117,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
 
         result = await receive_settings_value(update, context)
 
-        self.assertEqual(result, ConversationHandler.END)
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         self.assertEqual(services.database.get_setting("scheduled_change_time"), "")
         self.assertIn("deaktiviert", update.effective_message.replies[0].lower())
 
@@ -110,7 +154,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
 
         result = await receive_settings_value(update, context)
 
-        self.assertEqual(result, ConversationHandler.END)
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         self.assertIn("Timer wurde ab jetzt", update.effective_message.replies[0])
         self.assertEqual(context.application.job_queue.calls[-1]["interval"], 7200)
         self.assertEqual(context.application.job_queue.calls[-1]["first"], 7200)
@@ -124,7 +168,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
 
         result = await receive_settings_value(update, context)
 
-        self.assertEqual(result, ConversationHandler.END)
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         self.assertIn("überschreibt diese Anzeigedauer", update.effective_message.replies[0])
 
     async def test_receive_settings_value_applies_and_confirms_value(self) -> None:
@@ -144,7 +188,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
 
         result = await receive_settings_value(update, context)
 
-        self.assertEqual(result, ConversationHandler.END)
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         self.assertEqual(
             services.display.last_updates,
             {"image_settings": {"saturation": 1.8}},
@@ -191,7 +235,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.settings_conversation._switch_orientation_library", return_value=(False, "Es gibt noch keine Bilder für Hochformat.")):
             result = await receive_settings_value(update, context)
 
-        self.assertEqual(result, ConversationHandler.END)
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         self.assertEqual(
             services.display.last_updates,
             {"orientation": "vertical", "inverted_image": True},
@@ -218,12 +262,35 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.settings_conversation._switch_orientation_library", return_value=(True, "Zeige jetzt Querformat-Bild img-2.")):
             result = await receive_settings_value(update, context)
 
-        self.assertEqual(result, ConversationHandler.END)
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         self.assertEqual(
             services.display.last_updates,
             {"orientation": "horizontal", "inverted_image": False},
         )
         self.assertIn("Ausrichtung ist jetzt Querformat", update.effective_message.replies[0])
+
+    async def test_settings_callback_applies_orientation_choice_and_returns_to_menu(self) -> None:
+        services = _FakeServices(is_admin=True)
+        services.display.apply_result = DeviceSettingsApplyResult(
+            success=True,
+            message="ok",
+            confirmed_settings={"orientation": "horizontal"},
+            device_config_path=services.display.device_config_path,
+            saved=True,
+            reloaded=True,
+            refreshed=False,
+        )
+        update = _FakeCallbackUpdate("settings|apply|4|horizontal", user_id=11)
+        context = _FakeContext(services)
+
+        with patch("app.settings_conversation._switch_orientation_library", return_value=(True, "Zeige jetzt Querformat-Bild img-2.")):
+            result = await settings_callback(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
+        self.assertEqual(services.display.last_updates, {"orientation": "horizontal", "inverted_image": False})
+        self.assertIn("Ausrichtung ist jetzt Querformat", update.callback_query.text_edits[0])
+        labels = [button.text for row in update.callback_query.text_edit_markups[0].inline_keyboard for button in row]
+        self.assertIn("Schließen", labels)
 
 
 class OrientationSwitchTests(unittest.IsolatedAsyncioTestCase):
@@ -257,7 +324,7 @@ class OrientationSwitchTests(unittest.IsolatedAsyncioTestCase):
 
             result = await receive_settings_value(update, context)
 
-            self.assertEqual(result, ConversationHandler.END)
+            self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
             self.assertEqual(services.display.display_calls, ["img-rendered"])
             self.assertEqual(services.database.get_image_by_id("img-rendered").status, "displayed")
             self.assertIsNotNone(services.database.get_setting("last_new_image_displayed_at"))
@@ -273,7 +340,7 @@ class OrientationSwitchTests(unittest.IsolatedAsyncioTestCase):
 
             result = await receive_settings_value(update, context)
 
-            self.assertEqual(result, ConversationHandler.END)
+            self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
             self.assertEqual(services.display.display_calls, [])
             self.assertIn("Es gibt noch keine Bilder für Querformat.", update.effective_message.replies[0])
 
@@ -351,6 +418,17 @@ class _FakeDisplay:
             refreshed=True,
         )
 
+    def set_sleep_schedule(self, start: str | None, end: str | None) -> DeviceSettingsApplyResult:
+        return DeviceSettingsApplyResult(
+            success=True,
+            message="ok",
+            confirmed_settings={"sleep_schedule": (start, end)},
+            device_config_path=self.device_config_path,
+            saved=True,
+            reloaded=True,
+            refreshed=True,
+        )
+
 
 class _FakeDatabase:
     def __init__(self) -> None:
@@ -383,9 +461,11 @@ class _FakeMessage:
     def __init__(self, text: str):
         self.text = text
         self.replies: list[str] = []
+        self.reply_markups: list[object | None] = []
 
-    async def reply_text(self, text: str) -> None:
+    async def reply_text(self, text: str, **kwargs) -> None:
         self.replies.append(text)
+        self.reply_markups.append(kwargs.get("reply_markup"))
 
 
 class _FakeUser:
@@ -397,6 +477,33 @@ class _FakeUpdate:
     def __init__(self, text: str, *, user_id: int):
         self.effective_user = _FakeUser(user_id)
         self.effective_message = _FakeMessage(text)
+        self.callback_query = None
+
+
+class _FakeCallbackQuery:
+    def __init__(self, data: str):
+        self.data = data
+        self.message = _FakeMessage("")
+        self.text_edits: list[str] = []
+        self.text_edit_markups: list[object | None] = []
+
+    async def answer(self) -> None:
+        return None
+
+    async def edit_message_text(self, text: str, reply_markup=None) -> None:
+        self.text_edits.append(text)
+        self.text_edit_markups.append(reply_markup)
+
+    async def edit_message_caption(self, *, caption: str, reply_markup=None) -> None:
+        self.text_edits.append(caption)
+        self.text_edit_markups.append(reply_markup)
+
+
+class _FakeCallbackUpdate:
+    def __init__(self, data: str, *, user_id: int):
+        self.effective_user = _FakeUser(user_id)
+        self.callback_query = _FakeCallbackQuery(data)
+        self.effective_message = self.callback_query.message
 
 
 class _FakeContext:

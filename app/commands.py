@@ -15,6 +15,8 @@ from app.database import utcnow_iso
 from app.models import AppServices, DisplayRequest, DisplayResult, ImageRecord
 from app.orientation import format_orientation_label, orientation_matches
 
+COMMAND_CALLBACK_PREFIX = "cmd|"
+
 
 def get_services(context: ContextTypes.DEFAULT_TYPE) -> AppServices:
     return context.application.bot_data["services"]
@@ -28,35 +30,237 @@ def get_active_orientation(services: AppServices) -> str:
     return services.display.current_orientation()
 
 
-@require_whitelist
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(
-        "\n".join(
+def _command_callback_data(action: str) -> str:
+    return f"{COMMAND_CALLBACK_PREFIX}{action}"
+
+
+def _quick_actions_help(is_admin: bool) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton("Status", callback_data=_command_callback_data("status")),
+            InlineKeyboardButton("Liste", callback_data=_command_callback_data("list")),
+            InlineKeyboardButton("Löschen", callback_data=_command_callback_data("delete")),
+        ],
+        [
+            InlineKeyboardButton("Vorheriges", callback_data=_command_callback_data("prev")),
+            InlineKeyboardButton("Nächstes", callback_data=_command_callback_data("next")),
+        ],
+    ]
+    if is_admin:
+        rows.append([InlineKeyboardButton("Einstellungen", callback_data="settings|open")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _quick_actions_status(is_admin: bool) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton("Liste", callback_data=_command_callback_data("list")),
+            InlineKeyboardButton("Löschen", callback_data=_command_callback_data("delete")),
+        ],
+        [
+            InlineKeyboardButton("Vorheriges", callback_data=_command_callback_data("prev")),
+            InlineKeyboardButton("Nächstes", callback_data=_command_callback_data("next")),
+        ],
+    ]
+    if is_admin:
+        rows.append([InlineKeyboardButton("Einstellungen", callback_data="settings|open")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _quick_actions_list() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
             [
-                "Sende ein Foto, um den Upload-Prozess zu starten.",
-                "Ich frage optional nach:",
-                "- wo das Foto aufgenommen wurde",
-                "- wann es aufgenommen wurde",
-                "- welche Bildunterschrift angezeigt werden soll",
-                "",
-                "Befehle:",
-                "/help - diese Nachricht anzeigen",
-                "/next - nächstes Bild anzeigen",
-                "/prev - vorheriges Bild anzeigen",
-                "/list - nächste Bilder und Zeitplan anzeigen",
-                "/delete - ausgewähltes Bild löschen",
-                # "/refresh - aktuelles Bild neu laden",
-                # "/settings - Anzeigeeinstellungen anzeigen/ändern (nur Admins)",
-                # "/users - freigegebene Nutzer anzeigen (nur Admins)",
-                # "/unwhitelist - Nutzer entfernen (nur Admins)",
-                # "/restart - Raspberry Pi neu starten (nur Admins)",
-                # "/update - Projekt aktualisieren (nur Admins)",
-                "/status - Systemstatus anzeigen",
-                "/myid - deine Telegram-Nutzer-ID anzeigen",
-                "/cancel - den laufenden Upload abbrechen",
+                InlineKeyboardButton("Vorheriges", callback_data=_command_callback_data("prev")),
+                InlineKeyboardButton("Nächstes", callback_data=_command_callback_data("next")),
+            ],
+            [
+                InlineKeyboardButton("Löschen", callback_data=_command_callback_data("delete")),
+                InlineKeyboardButton("Neu laden", callback_data=_command_callback_data("list")),
+            ],
+        ]
+    )
+
+
+def _build_help_text(is_admin: bool) -> str:
+    lines = [
+        "Sende ein Foto, um den Upload-Prozess zu starten.",
+        "Ich frage optional nach:",
+        "- wo das Foto aufgenommen wurde",
+        "- wann es aufgenommen wurde",
+        "- welche Bildunterschrift angezeigt werden soll",
+        "",
+        "Befehle:",
+        "/help - diese Nachricht anzeigen",
+        "/next - nächstes Bild anzeigen",
+        "/prev - vorheriges Bild anzeigen",
+        "/list - nächste Bilder und Zeitplan anzeigen",
+        "/delete - ausgewähltes Bild löschen",
+        "/status - Systemstatus anzeigen",
+        "/myid - deine Telegram-Nutzer-ID anzeigen",
+        "/cancel - den laufenden Upload abbrechen",
+    ]
+    if is_admin:
+        lines.extend(
+            [
+                "/settings - Anzeigeeinstellungen anzeigen/ändern",
+                "/users - freigegebene Nutzer anzeigen",
+                "/unwhitelist - Nutzer entfernen",
+                "/restart - Raspberry Pi neu starten",
+                "/update - Projekt aktualisieren",
             ]
         )
+    return "\n".join(lines)
+
+
+async def _render_status_text(services: AppServices) -> str:
+    active_orientation = get_active_orientation(services)
+
+    db_ok = services.database.healthcheck()
+    storage_ok = services.storage.healthcheck()
+    payload_ok = services.display.payload_exists()
+
+    inkypi_reachable = await asyncio.to_thread(services.display.ping_inkypi)
+    if inkypi_reachable is None:
+        inkypi_line = "– lokal"
+    elif inkypi_reachable:
+        inkypi_line = "✓ erreichbar"
+    else:
+        inkypi_line = "✗ nicht erreichbar"
+
+    image_count = services.database.count_displayed_images(active_orientation)
+    rendered_count = services.database.count_rendered_images(active_orientation)
+    displayed_at = services.database.get_setting("current_image_displayed_at")
+    user_count = services.database.count_whitelisted_users()
+
+    image_lines = [
+        f"- Bibliothek: {format_orientation_label(active_orientation)}",
+        f"- In Rotation: {image_count} {'Bild' if image_count == 1 else 'Bilder'}",
+        f"- Aktuelles Bild: {_format_duration(displayed_at)}",
+    ]
+    if rendered_count > 0:
+        image_lines.append(f"- Warteschlange: {rendered_count} neue{'s' if rendered_count == 1 else ''} Bild{'er' if rendered_count != 1 else ''} wartend")
+
+    return "\n".join(
+        [
+            "Fotorahmen-Status",
+            "",
+            "Dienste:",
+            f"- Datenbank: {'✓ ok' if db_ok else '✗ Fehler'}",
+            f"- Speicher: {'✓ ok' if storage_ok else '✗ Fehler'}",
+            f"- InkyPi: {inkypi_line}",
+            f"- InkyPi-Payload: {'✓ vorhanden' if payload_ok else '✗ nicht gefunden'}",
+            "",
+            "Bilder:",
+            *image_lines,
+            "",
+            "Nutzer:",
+            f"- Freigegebene Nutzer: {user_count}",
+        ]
     )
+
+
+async def _render_list_text(services: AppServices) -> str:
+    active_orientation = get_active_orientation(services)
+    payload_path = services.config.storage.current_payload_path
+    if not payload_path.exists():
+        return "Noch kein Bild vorhanden."
+
+    try:
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return "Payload-Datei konnte nicht gelesen werden."
+
+    current_image_id = payload.get("image_id")
+    if not current_image_id:
+        return "Kein aktuelles Bild erkannt."
+
+    next_images = services.database.get_next_images(current_image_id, 5, active_orientation)
+    total = services.database.count_displayed_images(active_orientation)
+    current_pos = services.database.get_displayed_image_position(current_image_id, active_orientation)
+
+    lines = [f"Bilderliste {format_orientation_label(active_orientation)} ({total} gesamt)", ""]
+
+    current_record = services.database.get_image_by_id(current_image_id)
+    current_label = _image_label(current_record) if current_record else "(unbekannt)"
+    if current_record and not orientation_matches(current_record.orientation_bucket, active_orientation):
+        lines.append(f"{current_label} (aktuell angezeigt, nicht Teil der aktuellen Bibliothek)")
+    else:
+        lines.append(f"{current_label}")
+
+    interval = await asyncio.to_thread(services.display.get_slideshow_interval)
+
+    from datetime import datetime, timezone as tz
+    from app.slideshow import (
+        _seconds_until_scheduled_occurrence,
+        _set_next_fire_decision,
+        compute_next_fire_decision,
+        get_stored_next_fire_metadata,
+    )
+    from app.settings_conversation import _format_interval_label
+
+    now = datetime.now(tz.utc)
+    next_fire_raw = services.database.get_setting("slideshow_next_fire_at")
+    remaining = 0
+    if next_fire_raw:
+        try:
+            next_fire = datetime.fromisoformat(next_fire_raw)
+            if next_fire.tzinfo is None:
+                next_fire = next_fire.replace(tzinfo=tz.utc)
+            remaining = max(0, int((next_fire - now).total_seconds()))
+        except (ValueError, TypeError):
+            remaining = 0
+    stored_mode, stored_detail = get_stored_next_fire_metadata(services)
+    if remaining <= 0:
+        decision = compute_next_fire_decision(services, active_orientation)
+        remaining = decision.seconds
+        stored_mode, stored_detail = decision.mode, decision.detail
+        _set_next_fire_decision(services, decision)
+    elif stored_mode is None:
+        decision = compute_next_fire_decision(services, active_orientation)
+        stored_mode, stored_detail = decision.mode, decision.detail
+
+    remaining_str = _format_interval_label(remaining) if remaining > 0 else "weniger als 1 Minute"
+    lines.append(f"  Wechsel in ca. {remaining_str}")
+    lines.append(f"  {_format_timer_mode_label(stored_mode, stored_detail, interval)}")
+
+    rendered_count = services.database.count_rendered_images(active_orientation)
+    if rendered_count > 0:
+        from app.conversations import _cooldown_remaining, _get_cooldown_seconds
+
+        cooldown = _get_cooldown_seconds(services)
+        cd_remaining = _cooldown_remaining(services, cooldown)
+        lines.append("")
+        lines.append(f"Warteschlange: {rendered_count} neue{'s' if rendered_count == 1 else ''} Bild{'er' if rendered_count != 1 else ''}")
+        if cd_remaining > 0:
+            lines.append(f"  Nächstes neues Bild in ca. {_format_interval_label(cd_remaining)}")
+
+    if next_images:
+        lines.append("")
+        lines.append("Nächste Bilder:")
+        scheduled_mode_for_list = stored_mode == "scheduled_daily" and bool(stored_detail) and rendered_count == 0
+        for i, record in enumerate(next_images, 1):
+            pos = ((current_pos or 0) + i - 1) % total + 1
+            lines.append(f"{i}. [{pos}/{total}] {_image_label(record)}")
+            if scheduled_mode_for_list:
+                offset = _seconds_until_scheduled_occurrence(stored_detail, i - 1)
+            else:
+                offset = remaining + (i - 1) * interval
+            eta_str = _format_interval_label(offset) if offset > 0 else "weniger als 1 Minute"
+            lines.append(f"   In ca. {eta_str}")
+
+    return "\n".join(lines)
+
+
+@require_whitelist
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    services = get_services(context)
+    is_admin = services.auth.is_admin(user.id)
+    await message.reply_text(_build_help_text(is_admin), reply_markup=_quick_actions_help(is_admin))
 
 
 def _format_duration(since_iso: str | None) -> str:
@@ -88,53 +292,14 @@ def _format_duration(since_iso: str | None) -> str:
 
 @require_whitelist
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
     services = get_services(context)
-    active_orientation = get_active_orientation(services)
-
-    db_ok = services.database.healthcheck()
-    storage_ok = services.storage.healthcheck()
-    payload_ok = services.display.payload_exists()
-
-    inkypi_reachable = await asyncio.to_thread(services.display.ping_inkypi)
-    if inkypi_reachable is None:
-        inkypi_line = "– lokal"
-    elif inkypi_reachable:
-        inkypi_line = "✓ erreichbar"
-    else:
-        inkypi_line = "✗ nicht erreichbar"
-
-    image_count = services.database.count_displayed_images(active_orientation)
-    rendered_count = services.database.count_rendered_images(active_orientation)
-    displayed_at = services.database.get_setting("current_image_displayed_at")
-    user_count = services.database.count_whitelisted_users()
-
-    image_lines = [
-        f"- Bibliothek: {format_orientation_label(active_orientation)}",
-        f"- In Rotation: {image_count} {'Bild' if image_count == 1 else 'Bilder'}",
-        f"- Aktuelles Bild: {_format_duration(displayed_at)}",
-    ]
-    if rendered_count > 0:
-        image_lines.append(f"- Warteschlange: {rendered_count} neue{'s' if rendered_count == 1 else ''} Bild{'er' if rendered_count != 1 else ''} wartend")
-
-    await update.effective_message.reply_text(
-        "\n".join(
-            [
-                "Fotorahmen-Status",
-                "",
-                "Dienste:",
-                f"- Datenbank: {'✓ ok' if db_ok else '✗ Fehler'}",
-                f"- Speicher: {'✓ ok' if storage_ok else '✗ Fehler'}",
-                f"- InkyPi: {inkypi_line}",
-                f"- InkyPi-Payload: {'✓ vorhanden' if payload_ok else '✗ nicht gefunden'}",
-                "",
-                "Bilder:",
-                *image_lines,
-                "",
-                "Nutzer:",
-                f"- Freigegebene Nutzer: {user_count}",
-            ]
-        )
-    )
+    is_admin = services.auth.is_admin(user.id)
+    text = await _render_status_text(services)
+    await message.reply_text(text, reply_markup=_quick_actions_status(is_admin))
 
 
 async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -240,100 +405,67 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if message is None:
         return
     services = get_services(context)
-    active_orientation = get_active_orientation(services)
+    text = await _render_list_text(services)
+    await message.reply_text(text, reply_markup=_quick_actions_list())
 
-    payload_path = services.config.storage.current_payload_path
-    if not payload_path.exists():
-        await message.reply_text("Noch kein Bild vorhanden.")
+
+async def _authorize_command_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None:
+        return False
+
+    await query.answer()
+    if user is None:
+        return False
+
+    services = get_services(context)
+    services.auth.sync_user(user)
+    if not services.auth.is_whitelisted(user.id):
+        await _edit_query_message(
+            query,
+            "Du bist für diesen Fotorahmen noch nicht freigegeben. Bitte einen Admin, deine Telegram-ID hinzuzufügen.",
+        )
+        return False
+    return True
+
+
+async def command_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    if not await _authorize_command_callback(update, context):
         return
 
-    try:
-        payload = json.loads(payload_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        await message.reply_text("Payload-Datei konnte nicht gelesen werden.")
+    action = (query.data or "").removeprefix(COMMAND_CALLBACK_PREFIX)
+    services = get_services(context)
+    user = update.effective_user
+    is_admin = bool(user and services.auth.is_admin(user.id))
+
+    if action == "status":
+        await _edit_query_message(
+            query,
+            await _render_status_text(services),
+            reply_markup=_quick_actions_status(is_admin),
+        )
+        return
+    if action == "list":
+        await _edit_query_message(query, await _render_list_text(services), reply_markup=_quick_actions_list())
+        return
+    if action == "help":
+        await _edit_query_message(query, _build_help_text(is_admin), reply_markup=_quick_actions_help(is_admin))
+        return
+    if action == "next":
+        await next_command(update, context)
+        return
+    if action == "prev":
+        await prev_command(update, context)
+        return
+    if action == "delete":
+        await delete_command(update, context)
         return
 
-    current_image_id = payload.get("image_id")
-    if not current_image_id:
-        await message.reply_text("Kein aktuelles Bild erkannt.")
-        return
-
-    next_images = services.database.get_next_images(current_image_id, 5, active_orientation)
-    total = services.database.count_displayed_images(active_orientation)
-    current_pos = services.database.get_displayed_image_position(current_image_id, active_orientation)
-
-
-    lines = [f"Bilderliste {format_orientation_label(active_orientation)} ({total} gesamt)", ""]
-
-    current_record = services.database.get_image_by_id(current_image_id)
-    current_label = _image_label(current_record) if current_record else "(unbekannt)"
-    if current_record and not orientation_matches(current_record.orientation_bucket, active_orientation):
-        lines.append(f"{current_label} (aktuell angezeigt, nicht Teil der aktuellen Bibliothek)")
-    else:
-        lines.append(f"{current_label}")
-
-    interval = await asyncio.to_thread(services.display.get_slideshow_interval)
-
-    # Time remaining until next image change — read directly from stored timestamp
-    from datetime import datetime, timezone as tz
-    from app.slideshow import (
-        _seconds_until_scheduled_occurrence,
-        _set_next_fire_decision,
-        compute_next_fire_decision,
-        get_stored_next_fire_metadata,
-    )
-    from app.settings_conversation import _format_interval_label
-    now = datetime.now(tz.utc)
-    next_fire_raw = services.database.get_setting("slideshow_next_fire_at")
-    remaining = 0
-    if next_fire_raw:
-        try:
-            next_fire = datetime.fromisoformat(next_fire_raw)
-            if next_fire.tzinfo is None:
-                next_fire = next_fire.replace(tzinfo=tz.utc)
-            remaining = max(0, int((next_fire - now).total_seconds()))
-        except (ValueError, TypeError):
-            remaining = 0
-    stored_mode, stored_detail = get_stored_next_fire_metadata(services)
-    if remaining <= 0:
-        decision = compute_next_fire_decision(services, active_orientation)
-        remaining = decision.seconds
-        stored_mode, stored_detail = decision.mode, decision.detail
-        _set_next_fire_decision(services, decision)
-    elif stored_mode is None:
-        decision = compute_next_fire_decision(services, active_orientation)
-        stored_mode, stored_detail = decision.mode, decision.detail
-
-    remaining_str = _format_interval_label(remaining) if remaining > 0 else "weniger als 1 Minute"
-    lines.append(f"  Wechsel in ca. {remaining_str}")
-    lines.append(f"  {_format_timer_mode_label(stored_mode, stored_detail, interval)}")
-
-    # Show pending new images (rendered, waiting for cooldown)
-    rendered_count = services.database.count_rendered_images(active_orientation)
-    if rendered_count > 0:
-        from app.conversations import _get_cooldown_seconds, _cooldown_remaining
-        cooldown = _get_cooldown_seconds(services)
-        cd_remaining = _cooldown_remaining(services, cooldown)
-        lines.append("")
-        lines.append(f"Warteschlange: {rendered_count} neue{'s' if rendered_count == 1 else ''} Bild{'er' if rendered_count != 1 else ''}")
-        if cd_remaining > 0:
-            lines.append(f"  Nächstes neues Bild in ca. {_format_interval_label(cd_remaining)}")
-
-    if next_images:
-        lines.append("")
-        lines.append("Nächste Bilder:")
-        scheduled_mode_for_list = stored_mode == "scheduled_daily" and bool(stored_detail) and rendered_count == 0
-        for i, record in enumerate(next_images, 1):
-            pos = ((current_pos or 0) + i - 1) % total + 1
-            lines.append(f"{i}. [{pos}/{total}] {_image_label(record)}")
-            if scheduled_mode_for_list:
-                offset = _seconds_until_scheduled_occurrence(stored_detail, i - 1)
-            else:
-                offset = remaining + (i - 1) * interval
-            eta_str = _format_interval_label(offset) if offset > 0 else "weniger als 1 Minute"
-            lines.append(f"   In ca. {eta_str}")
-
-    await message.reply_text("\n".join(lines))
+    await _edit_query_message(query, "Unbekannte Aktion.")
 
 
 async def _display_target(services: AppServices, target: ImageRecord) -> DisplayResult:
@@ -811,7 +943,7 @@ async def stray_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
 
-async def _edit_query_message(query, text: str) -> None:
+async def _edit_query_message(query, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
     message = query.message
     has_media = bool(
         getattr(message, "photo", None)
@@ -821,15 +953,21 @@ async def _edit_query_message(query, text: str) -> None:
     )
     if has_media:
         try:
-            await query.edit_message_caption(caption=text)
+            await query.edit_message_caption(caption=text, reply_markup=reply_markup)
             return
-        except Exception:
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return
             pass
     try:
-        await query.edit_message_text(text)
-    except Exception:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+    except Exception as exc:
+        if "message is not modified" in str(exc).lower():
+            return
         try:
             if not has_media:
-                await query.edit_message_caption(caption=text)
-        except Exception:
+                await query.edit_message_caption(caption=text, reply_markup=reply_markup)
+        except Exception as caption_exc:
+            if "message is not modified" in str(caption_exc).lower():
+                return
             logger.warning("Could not edit query message")
