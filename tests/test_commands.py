@@ -8,8 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.commands import (
-    delete_cancel_callback,
-    delete_confirm_callback,
+    _delete_cancel_callback,
+    _delete_confirm_callback,
+    delete_command,
     list_command,
     next_command,
     prev_command,
@@ -20,7 +21,59 @@ from app.models import DisplayResult, ImageRecord
 
 
 class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def test_delete_confirm_callback_handles_text_only_confirmation_message(self) -> None:
+    async def test_delete_command_shows_paginated_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-1"}),
+                encoding="utf-8",
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-1.jpg"),
+                    local_rendered_path=None,
+                    location="Berlin",
+                    taken_at="2026-03-18",
+                    caption="First",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                )
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-2",
+                    telegram_file_id="file-2",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-2.jpg"),
+                    local_rendered_path=None,
+                    location="Munich",
+                    taken_at="2026-03-19",
+                    caption="Second",
+                    uploaded_by=1,
+                    created_at="2026-03-18T13:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                )
+            )
+
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await delete_command(update, context)
+
+            reply = update.effective_message.replies[0]
+            self.assertIn("First", reply)
+            self.assertIn("Second", reply)
+            self.assertIn("▶", reply)  # current image marker
+
+    async def test_delete_confirm_blocks_last_image(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             services = _build_services(tmpdir_path)
@@ -46,22 +99,21 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-            update = _FakeUpdate(data="delete_confirm:img-1", has_media=False)
+            update = _FakeUpdate(data="del|y|img-1", has_media=False)
             context = _FakeContext(services)
 
-            await delete_confirm_callback(update, context)
+            await _delete_confirm_callback(update, context)
 
             self.assertEqual(update.callback_query.text_edits, [
                 "Das letzte Bild kann nicht gelöscht werden. Lade zuerst ein neues Bild hoch."
             ])
-            self.assertEqual(update.callback_query.caption_edits, [])
 
     async def test_delete_cancel_callback_uses_caption_edit_for_media_messages(self) -> None:
         services = _build_services(Path(tempfile.mkdtemp()))
-        update = _FakeUpdate(data="delete_cancel", has_media=True)
+        update = _FakeUpdate(data="del|c", has_media=True)
         context = _FakeContext(services)
 
-        await delete_cancel_callback(update, context)
+        await _delete_cancel_callback(update, context)
 
         self.assertEqual(update.callback_query.caption_edits, ["Löschen abgebrochen."])
         self.assertEqual(update.callback_query.text_edits, [])
@@ -328,7 +380,7 @@ class _FakeMessageOnly:
     def __init__(self) -> None:
         self.replies: list[str] = []
 
-    async def reply_text(self, text: str) -> None:
+    async def reply_text(self, text: str, **kwargs) -> None:
         self.replies.append(text)
 
 

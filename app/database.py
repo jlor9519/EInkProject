@@ -598,6 +598,37 @@ class Database:
 
             return results
 
+    def get_all_displayed_images_ordered(self, current_image_id: str, active_orientation: str | None = None) -> list[ImageRecord]:
+        """Return all displayed images in slideshow order, starting from current_image_id.
+
+        The current image is first, then subsequent images in created_at order,
+        wrapping around to the oldest.
+        """
+        with self._lock:
+            current = self._connection.execute(
+                "SELECT created_at FROM images WHERE image_id = ?", (current_image_id,)
+            ).fetchone()
+            if current is None:
+                return []
+            current_created_at = current["created_at"]
+            orientation_args = self._orientation_args(active_orientation)
+            orientation_sql = self._orientation_filter_sql(active_orientation)
+
+            # Current + everything after it
+            rows_after = self._connection.execute(
+                f"SELECT * FROM images WHERE created_at >= ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC",
+                (current_created_at, *self._DISPLAYED_STATUSES, *orientation_args),
+            ).fetchall()
+            # Everything before it (wrap around)
+            rows_before = self._connection.execute(
+                f"SELECT * FROM images WHERE created_at < ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC",
+                (current_created_at, *self._DISPLAYED_STATUSES, *orientation_args),
+            ).fetchall()
+
+            results = [self._row_to_image(r) for r in rows_after]
+            results.extend(self._row_to_image(r) for r in rows_before)
+            return results
+
     def get_newest_eligible_orientation_image(self, active_orientation: str) -> ImageRecord | None:
         with self._lock:
             orientation_args = self._orientation_args(active_orientation)

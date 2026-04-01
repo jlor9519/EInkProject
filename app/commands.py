@@ -203,6 +203,16 @@ def _friendly_display_error(message: str) -> str:
     return f"Anzeige fehlgeschlagen: {message}"
 
 
+def _image_label(record: ImageRecord) -> str:
+    parts = []
+    if record.caption:
+        parts.append(f'"{record.caption}"')
+    if record.location:
+        parts.append(record.location)
+    if record.taken_at:
+        parts.append(record.taken_at)
+    return " • ".join(parts) if parts else "(kein Text)"
+
 
 @require_whitelist
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -232,15 +242,6 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     total = services.database.count_displayed_images(active_orientation)
     current_pos = services.database.get_displayed_image_position(current_image_id, active_orientation)
 
-    def _image_label(record: ImageRecord) -> str:
-        parts = []
-        if record.caption:
-            parts.append(f'"{record.caption}"')
-        if record.location:
-            parts.append(record.location)
-        if record.taken_at:
-            parts.append(record.taken_at)
-        return " • ".join(parts) if parts else "(kein Text)"
 
     lines = [f"Bilderliste {format_orientation_label(active_orientation)} ({total} gesamt)", ""]
 
@@ -439,6 +440,56 @@ async def prev_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _navigate(update, context, "prev")
 
 
+_DELETE_PAGE_SIZE = 10
+
+
+def _get_current_image_id(services: AppServices) -> str | None:
+    payload_path = services.config.storage.current_payload_path
+    if not payload_path.exists():
+        return None
+    try:
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return payload.get("image_id") or None
+
+
+def _build_delete_page(
+    images: list[ImageRecord],
+    offset: int,
+    current_image_id: str | None,
+    total: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    page = images[offset : offset + _DELETE_PAGE_SIZE]
+    lines = [f"Bilder zum Löschen ({total} gesamt)\n"]
+    for i, record in enumerate(page):
+        num = i + 1
+        marker = " ▶" if record.image_id == current_image_id else ""
+        lines.append(f"{num}. {_image_label(record)}{marker}")
+    text = "\n".join(lines)
+
+    # Number buttons — two rows of 5
+    number_buttons = [
+        InlineKeyboardButton(str(i + 1), callback_data=f"del|s|{offset + i}|{record.image_id}")
+        for i, record in enumerate(page)
+    ]
+    keyboard_rows = [number_buttons[:5]]
+    if len(number_buttons) > 5:
+        keyboard_rows.append(number_buttons[5:])
+
+    # Navigation row
+    nav_row = []
+    if offset > 0:
+        nav_row.append(InlineKeyboardButton("← Zurück", callback_data=f"del|p|{max(0, offset - _DELETE_PAGE_SIZE)}"))
+    if offset + _DELETE_PAGE_SIZE < total:
+        nav_row.append(InlineKeyboardButton("Weiter →", callback_data=f"del|p|{offset + _DELETE_PAGE_SIZE}"))
+    if nav_row:
+        keyboard_rows.append(nav_row)
+
+    keyboard_rows.append([InlineKeyboardButton("Abbrechen", callback_data="del|c")])
+    return text, InlineKeyboardMarkup(keyboard_rows)
+
+
 @require_whitelist
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
@@ -446,111 +497,215 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     services = get_services(context)
-    payload_path = services.config.storage.current_payload_path
-    if not payload_path.exists():
+    current_image_id = _get_current_image_id(services)
+    if not current_image_id:
         await message.reply_text("Kein Bild zum Löschen vorhanden.")
         return
 
-    try:
-        payload = json.loads(payload_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        await message.reply_text("Aktuelle Payload-Datei konnte nicht gelesen werden.")
+    active_orientation = get_active_orientation(services)
+    images = services.database.get_all_displayed_images_ordered(current_image_id, active_orientation)
+    if not images:
+        await message.reply_text("Keine Bilder in der aktuellen Bibliothek.")
         return
 
-    current_image_id = payload.get("image_id")
-    if not current_image_id:
-        await message.reply_text("Kein aktuelles Bild erkannt.")
-        return
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Ja, löschen", callback_data=f"delete_confirm:{current_image_id}"),
-            InlineKeyboardButton("Abbrechen", callback_data="delete_cancel"),
-        ],
-    ])
-
-    # Send the current image as a preview so the user knows what they're deleting
-    image_path = services.config.storage.current_image_path
-    record = services.database.get_image_by_id(current_image_id)
-    if not image_path.exists() and record and record.local_rendered_path:
-        image_path = Path(record.local_rendered_path)
-    if not image_path.exists() and record:
-        image_path = Path(record.local_original_path)
-
-    if image_path.exists():
-        with open(image_path, "rb") as photo:
-            await message.reply_photo(
-                photo=photo,
-                caption=f"Bild {current_image_id} wirklich löschen?",
-                reply_markup=keyboard,
-            )
-    else:
-        await message.reply_text(
-            f"Bild {current_image_id} wirklich löschen?",
-            reply_markup=keyboard,
-        )
+    text, keyboard = _build_delete_page(images, 0, current_image_id, len(images))
+    await message.reply_text(text, reply_markup=keyboard)
 
 
-async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _delete_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
         return
     await query.answer()
 
-    lock = get_display_lock(context)
-    if lock.locked():
-        await _edit_query_message(query, "Eine Aktualisierung läuft bereits. Bitte warten.")
+    offset = int(query.data.split("|")[2])
+    services = get_services(context)
+    current_image_id = _get_current_image_id(services)
+    active_orientation = get_active_orientation(services)
+    images = services.database.get_all_displayed_images_ordered(
+        current_image_id or "", active_orientation
+    )
+    if not images:
+        await _edit_query_message(query, "Keine Bilder mehr vorhanden.")
         return
 
-    async with lock:
-        image_id = query.data.split(":", 1)[1] if ":" in query.data else ""
-        services = get_services(context)
-        active_orientation = get_active_orientation(services)
+    if offset >= len(images):
+        offset = 0
+    text, keyboard = _build_delete_page(images, offset, current_image_id, len(images))
+    try:
+        await query.edit_message_text(text, reply_markup=keyboard)
+    except Exception:
+        logger.warning("Could not edit delete page message")
 
-        record = services.database.get_image_by_id(image_id)
 
-        # Find replacement before deleting
-        replacement = services.database.get_adjacent_image(image_id, "next", active_orientation)
-        if replacement is None:
-            replacement = services.database.get_adjacent_image(image_id, "prev", active_orientation)
+async def _delete_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
 
-        if replacement is None:
-            await _edit_query_message(
-                query,
-                "Das letzte Bild kann nicht gelöscht werden. Lade zuerst ein neues Bild hoch.",
+    parts = query.data.split("|")
+    index = int(parts[2])
+    image_id = parts[3]
+    page_offset = (index // _DELETE_PAGE_SIZE) * _DELETE_PAGE_SIZE
+
+    services = get_services(context)
+    record = services.database.get_image_by_id(image_id)
+    if record is None:
+        await _edit_query_message(query, "Bild nicht mehr vorhanden.")
+        return
+
+    current_image_id = _get_current_image_id(services)
+    is_current = record.image_id == current_image_id
+    label = _image_label(record)
+    caption = f"{label}\n\n{'▶ Aktuell angezeigt' if is_current else ''}\nDieses Bild löschen?".strip()
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Löschen", callback_data=f"del|y|{image_id}"),
+            InlineKeyboardButton("Zurück", callback_data=f"del|b|{page_offset}"),
+        ],
+        [InlineKeyboardButton("Abbrechen", callback_data="del|c")],
+    ])
+
+    # Try to find an image file to show as preview
+    image_path = None
+    if is_current:
+        candidate = services.config.storage.current_image_path
+        if candidate.exists():
+            image_path = candidate
+    if image_path is None and record.local_rendered_path:
+        candidate = Path(record.local_rendered_path)
+        if candidate.exists():
+            image_path = candidate
+    if image_path is None:
+        candidate = Path(record.local_original_path)
+        if candidate.exists():
+            image_path = candidate
+
+    chat_id = query.message.chat_id
+    message_id = query.message.message_id
+
+    if image_path is not None:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            pass
+        with open(image_path, "rb") as photo:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=caption,
+                reply_markup=keyboard,
             )
+    else:
+        try:
+            await query.edit_message_text(caption, reply_markup=keyboard)
+        except Exception:
+            logger.warning("Could not edit message for delete preview")
+
+
+async def _delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+
+    image_id = query.data.split("|")[2]
+    services = get_services(context)
+    record = services.database.get_image_by_id(image_id)
+    if record is None:
+        await _edit_query_message(query, "Bild nicht mehr vorhanden.")
+        return
+
+    current_image_id = _get_current_image_id(services)
+    is_current = image_id == current_image_id
+    active_orientation = get_active_orientation(services)
+
+    if is_current:
+        lock = get_display_lock(context)
+        if lock.locked():
+            await _edit_query_message(query, "Eine Aktualisierung läuft bereits. Bitte warten.")
             return
 
-        await _edit_query_message(query, "Wird gelöscht...")
+        async with lock:
+            replacement = services.database.get_adjacent_image(image_id, "next", active_orientation)
+            if replacement is None:
+                replacement = services.database.get_adjacent_image(image_id, "prev", active_orientation)
 
-        # Delete from database
-        services.database.delete_image(image_id)
+            if replacement is None:
+                await _edit_query_message(
+                    query,
+                    "Das letzte Bild kann nicht gelöscht werden. Lade zuerst ein neues Bild hoch.",
+                )
+                return
 
-        # Delete local files
-        if record:
+            await _edit_query_message(query, "Wird gelöscht...")
+            services.database.delete_image(image_id)
             for file_path_str in (record.local_original_path, record.local_rendered_path):
                 if file_path_str:
                     Path(file_path_str).unlink(missing_ok=True)
 
-        result = await _display_target(services, replacement)
+            result = await _display_target(services, replacement)
+            total = services.database.count_displayed_images(active_orientation)
+            if result.success:
+                services.database.set_setting("current_image_displayed_at", utcnow_iso())
+                await _edit_query_message(
+                    query,
+                    f"Bild gelöscht. Zeige jetzt {_image_label(replacement)} ({total} Bilder verbleibend).",
+                )
+                from app.slideshow import reschedule_slideshow_job
+                reschedule_slideshow_job(context.application)
+            else:
+                await _edit_query_message(
+                    query,
+                    f"Bild gelöscht. {_friendly_display_error(result.message)}",
+                )
+    else:
+        # Not the current image — just delete, no display change needed
+        services.database.delete_image(image_id)
+        for file_path_str in (record.local_original_path, record.local_rendered_path):
+            if file_path_str:
+                Path(file_path_str).unlink(missing_ok=True)
 
         total = services.database.count_displayed_images(active_orientation)
-        if result.success:
-            services.database.set_setting("current_image_displayed_at", utcnow_iso())
-            await _edit_query_message(
-                query,
-                f"Bild {image_id} gelöscht. Zeige jetzt {replacement.image_id} ({total} Bilder verbleibend).",
-            )
-            from app.slideshow import reschedule_slideshow_job
-            reschedule_slideshow_job(context.application)
-        else:
-            await _edit_query_message(
-                query,
-                f"Bild {image_id} gelöscht. {_friendly_display_error(result.message)}",
-            )
+        await _edit_query_message(
+            query,
+            f"Bild gelöscht ({total} Bilder verbleibend).",
+        )
 
 
-async def delete_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _delete_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+
+    offset = int(query.data.split("|")[2])
+    services = get_services(context)
+    current_image_id = _get_current_image_id(services)
+    active_orientation = get_active_orientation(services)
+    images = services.database.get_all_displayed_images_ordered(
+        current_image_id or "", active_orientation
+    )
+    if not images:
+        await _edit_query_message(query, "Keine Bilder mehr vorhanden.")
+        return
+
+    if offset >= len(images):
+        offset = 0
+    text, keyboard = _build_delete_page(images, offset, current_image_id, len(images))
+
+    chat_id = query.message.chat_id
+    message_id = query.message.message_id
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+
+
+async def _delete_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
         return

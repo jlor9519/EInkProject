@@ -7,10 +7,13 @@ from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, 
 
 from app.slideshow import schedule_slideshow_job
 from app.commands import (
+    _delete_back_callback,
+    _delete_cancel_callback,
+    _delete_confirm_callback,
+    _delete_page_callback,
+    _delete_select_callback,
     cancel_command,
-    delete_cancel_callback,
     delete_command,
-    delete_confirm_callback,
     help_command,
     list_command,
     myid_command,
@@ -101,8 +104,11 @@ def build_application(services: AppServices) -> Application:
     application.add_handler(CommandHandler("prev", prev_command))
     application.add_handler(CommandHandler("list", list_command))
     application.add_handler(CommandHandler("delete", delete_command))
-    application.add_handler(CallbackQueryHandler(delete_confirm_callback, pattern=r"^delete_confirm:"))
-    application.add_handler(CallbackQueryHandler(delete_cancel_callback, pattern=r"^delete_cancel$"))
+    application.add_handler(CallbackQueryHandler(_delete_page_callback, pattern=r"^del\|p\|"))
+    application.add_handler(CallbackQueryHandler(_delete_select_callback, pattern=r"^del\|s\|"))
+    application.add_handler(CallbackQueryHandler(_delete_confirm_callback, pattern=r"^del\|y\|"))
+    application.add_handler(CallbackQueryHandler(_delete_back_callback, pattern=r"^del\|b\|"))
+    application.add_handler(CallbackQueryHandler(_delete_cancel_callback, pattern=r"^del\|c$"))
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("restart", restart_command))
     application.add_handler(CommandHandler("update", update_command))

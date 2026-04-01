@@ -243,6 +243,46 @@ class DatabaseTests(unittest.TestCase):
             database.mark_maintenance_job_notified("job-1")
             self.assertEqual(database.get_unnotified_finished_maintenance_jobs(), [])
 
+    def test_get_all_displayed_images_ordered_wraps_around(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+            for i, (img_id, bucket) in enumerate([
+                ("img-a", "shared"),
+                ("img-b", "vertical"),
+                ("img-c", "shared"),
+                ("img-d", "horizontal"),
+            ]):
+                database.upsert_image(
+                    ImageRecord(
+                        image_id=img_id,
+                        telegram_file_id=f"file-{i}",
+                        telegram_chat_id=1,
+                        local_original_path=f"/tmp/{img_id}.jpg",
+                        local_rendered_path=None,
+                        location="",
+                        taken_at="",
+                        caption=f"Caption {img_id}",
+                        uploaded_by=1,
+                        created_at=f"2026-03-18T12:{i:02d}:00+00:00",
+                        status="displayed",
+                        last_error=None,
+                        orientation_bucket=bucket,
+                    )
+                )
+
+            # Starting from img-b in vertical pool: img-b, img-c, img-a (wrap)
+            ordered = database.get_all_displayed_images_ordered("img-b", "vertical")
+            self.assertEqual([r.image_id for r in ordered], ["img-b", "img-c", "img-a"])
+
+            # Starting from img-c in vertical pool: img-c, img-a (wrap), img-b (wrap)
+            ordered = database.get_all_displayed_images_ordered("img-c", "vertical")
+            self.assertEqual([r.image_id for r in ordered], ["img-c", "img-a", "img-b"])
+
+            # No orientation filter: all 4 images, starting from img-c
+            ordered = database.get_all_displayed_images_ordered("img-c", None)
+            self.assertEqual([r.image_id for r in ordered], ["img-c", "img-d", "img-a", "img-b"])
+
     def test_orientation_aware_queries_filter_active_library(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             database = Database(Path(tmpdir) / "frame.db")
