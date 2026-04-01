@@ -11,7 +11,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Con
 
 from app.auth import require_admin
 from app.commands import _delete_query_message, _display_target, _edit_query_message, get_display_lock, get_services
-from app.database import utcnow_iso
+from app.display_state import DISPLAY_TRANSITION_KEYS, begin_display_transition, clear_display_transition, commit_display_success
 from app.orientation import format_orientation_label, normalize_orientation_value
 
 WAITING_FOR_SETTINGS_CHOICE, WAITING_FOR_SETTINGS_VALUE = range(10, 12)
@@ -346,21 +346,25 @@ async def _switch_orientation_library(context: ContextTypes.DEFAULT_TYPE, orient
             )
 
         was_rendered = target.status == "rendered"
+        begin_display_transition(services.database, target.image_id, "orientation_switch")
         result = await _display_target(services, target)
         if not result.success:
             if was_rendered:
                 target.status = "display_failed"
                 target.last_error = result.message
-                services.database.upsert_image(target)
+                services.database.apply_image_and_settings(target, clear_keys=DISPLAY_TRANSITION_KEYS)
+            else:
+                clear_display_transition(services.database)
             return False, f"Passendes Bild konnte nicht angezeigt werden: {result.message}"
 
         if was_rendered:
             target.status = "displayed"
             target.last_error = None
-            services.database.upsert_image(target)
-            services.database.set_setting("last_new_image_displayed_at", utcnow_iso())
-
-        services.database.set_setting("current_image_displayed_at", utcnow_iso())
+        commit_display_success(
+            services.database,
+            target,
+            mark_new_image=was_rendered,
+        )
 
         from app.slideshow import reschedule_slideshow_job
 

@@ -9,6 +9,7 @@ from typing import Iterable
 logger = logging.getLogger(__name__)
 
 from app.models import StorageConfig
+from app.fs_utils import directory_is_writable, free_disk_bytes, safe_unlink
 
 
 class StorageService:
@@ -30,7 +31,19 @@ class StorageService:
         return self.config.rendered_dir / f"{image_id}{extension}"
 
     def healthcheck(self) -> bool:
-        return all(p.exists() for p in (self.config.incoming_dir, self.config.rendered_dir))
+        details = self.health_details()
+        return bool(details["paths_exist"] and details["writable"])
+
+    def health_details(self) -> dict[str, int | bool | None]:
+        directories = list(self._directories())
+        paths_exist = all(path.exists() for path in directories)
+        writable = all(directory_is_writable(path, logger=logger) for path in directories)
+        free_bytes = free_disk_bytes(self.config.current_payload_path.parent)
+        return {
+            "paths_exist": paths_exist,
+            "writable": writable,
+            "free_bytes": free_bytes,
+        }
 
     def cleanup_rendered_cache(self) -> None:
         keep = max(self.config.keep_recent_rendered, 0)
@@ -43,7 +56,7 @@ class StorageService:
         if to_remove:
             logger.info("Cleaning up %d old rendered file(s)", len(to_remove))
         for old_file in to_remove:
-            old_file.unlink(missing_ok=True)
+            safe_unlink(old_file, logger=logger)
 
     def _directories(self) -> Iterable[Path]:
         return (
@@ -55,4 +68,3 @@ class StorageService:
             self.config.current_payload_path.parent,
             self.config.current_image_path.parent,
         )
-

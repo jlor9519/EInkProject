@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.database import Database
+from app.display_state import DISPLAY_TRANSITION_KEYS
 from app.models import ImageRecord
 
 
@@ -217,6 +218,75 @@ class DatabaseTests(unittest.TestCase):
             assert record is not None
             self.assertEqual(record.telegram_chat_id, None)
             self.assertEqual(record.orientation_bucket, "shared")
+
+    def test_initialize_enables_sqlite_pragmas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+
+            journal_mode = database._connection.execute("PRAGMA journal_mode").fetchone()[0]  # noqa: SLF001
+            busy_timeout = database._connection.execute("PRAGMA busy_timeout").fetchone()[0]  # noqa: SLF001
+            foreign_keys = database._connection.execute("PRAGMA foreign_keys").fetchone()[0]  # noqa: SLF001
+
+            self.assertEqual(str(journal_mode).lower(), "wal")
+            self.assertEqual(int(busy_timeout), 5000)
+            self.assertEqual(int(foreign_keys), 1)
+
+    def test_reconcile_runtime_state_promotes_payload_image_and_requeues_other_processing_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+            current = ImageRecord(
+                image_id="img-current",
+                telegram_file_id="file-current",
+                telegram_chat_id=111,
+                local_original_path="/tmp/current.jpg",
+                local_rendered_path="/tmp/current.png",
+                location="",
+                taken_at="",
+                caption="",
+                uploaded_by=111,
+                created_at="2026-03-18T12:00:00+00:00",
+                status="processing",
+                last_error=None,
+                orientation_bucket="shared",
+            )
+            other = ImageRecord(
+                image_id="img-other",
+                telegram_file_id="file-other",
+                telegram_chat_id=111,
+                local_original_path="/tmp/other.jpg",
+                local_rendered_path=None,
+                location="",
+                taken_at="",
+                caption="",
+                uploaded_by=111,
+                created_at="2026-03-18T12:05:00+00:00",
+                status="processing",
+                last_error=None,
+                orientation_bucket="shared",
+            )
+            database.upsert_image(current)
+            database.upsert_image(other)
+            database.set_settings(
+                {
+                    "display_transition_image_id": "img-current",
+                    "display_transition_started_at": "2026-03-18T12:00:00+00:00",
+                    "display_transition_kind": "upload",
+                }
+            )
+
+            pending = database.reconcile_runtime_state(
+                "img-current",
+                transition_keys=DISPLAY_TRANSITION_KEYS,
+            )
+
+            self.assertEqual(database.get_image_by_id("img-current").status, "displayed")
+            self.assertEqual(database.get_image_by_id("img-other").status, "queued")
+            self.assertEqual([record.image_id for record in pending], ["img-other"])
+            self.assertIsNotNone(database.get_setting("current_image_displayed_at"))
+            for key in DISPLAY_TRANSITION_KEYS:
+                self.assertIsNone(database.get_setting(key))
 
     def test_maintenance_job_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

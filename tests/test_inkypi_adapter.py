@@ -10,6 +10,7 @@ from urllib.error import HTTPError, URLError
 
 from PIL import Image
 
+from app.database import Database
 from app.inkypi_adapter import InkyPiAdapter
 from app.models import DisplayConfig, DisplayRequest, InkyPiConfig, StorageConfig
 
@@ -186,6 +187,59 @@ class InkyPiAdapterTests(unittest.TestCase):
             self.assertIn("refresh ok", result.message)
             device_config = json.loads((tmpdir_path / "InkyPi" / "src" / "config" / "device.json").read_text(encoding="utf-8"))
             self.assertEqual(device_config["orientation"], "vertical")
+
+    def test_runtime_settings_use_cache_when_device_json_becomes_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            storage_config = self._build_storage(tmpdir_path)
+            display_config = self._build_display_config()
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            database = Database(tmpdir_path / "photo_frame.db")
+            database.initialize()
+            device_config_path = tmpdir_path / "InkyPi" / "src" / "config" / "device.json"
+            device_config_path.parent.mkdir(parents=True, exist_ok=True)
+            device_config_path.write_text(
+                json.dumps(
+                    {
+                        "orientation": "vertical",
+                        "playlist_config": {
+                            "playlists": [
+                                {
+                                    "name": "Default",
+                                    "start_time": "08:00",
+                                    "end_time": "22:00",
+                                    "plugins": [
+                                        {
+                                            "plugin_id": inkypi_config.plugin_id,
+                                            "refresh": {"interval": 7200},
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            adapter = InkyPiAdapter(inkypi_config, storage_config, display_config, database=database)
+
+            self.assertEqual(adapter.current_orientation(), "vertical")
+            self.assertEqual(adapter.get_slideshow_interval(), 7200)
+            self.assertEqual(adapter.get_sleep_schedule(), ("22:00", "08:00"))
+
+            device_config_path.write_text("{invalid json", encoding="utf-8")
+
+            self.assertEqual(adapter.current_orientation(), "vertical")
+            self.assertEqual(adapter.get_slideshow_interval(), 7200)
+            self.assertEqual(adapter.get_sleep_schedule(), ("22:00", "08:00"))
+            diagnostics = adapter.runtime_settings_diagnostics()
+            self.assertTrue(diagnostics["degraded"])
+            self.assertIn("Cache", diagnostics["message"])
 
     def test_apply_device_settings_saves_reloads_and_refreshes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

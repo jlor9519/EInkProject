@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.config import load_config
 from app.database import Database
+from app.fs_utils import safe_unlink
 
 
 @dataclass(slots=True)
@@ -30,8 +31,7 @@ def clear_all_images(
             path = Path(path_value)
             if path in deleted_paths:
                 continue
-            existed = path.exists()
-            path.unlink(missing_ok=True)
+            existed = safe_unlink(path)
             if existed:
                 deleted_files += 1
                 deleted_paths.add(path)
@@ -40,8 +40,7 @@ def clear_all_images(
     for path in (current_payload_path, current_image_path):
         if path in deleted_paths:
             continue
-        existed = path.exists()
-        path.unlink(missing_ok=True)
+        existed = safe_unlink(path)
         if existed:
             deleted_files += 1
             deleted_paths.add(path)

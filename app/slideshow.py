@@ -3,13 +3,23 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from telegram.ext import Application
 
 from app.commands import _display_target
 from app.conversations import _cooldown_remaining, _get_cooldown_seconds
-from app.database import utcnow_iso
+from app.display_state import (
+    DISPLAY_TRANSITION_KEYS,
+    begin_display_transition,
+    clear_display_transition,
+    commit_display_success,
+)
+from app.time_utils import (
+    is_in_local_time_window,
+    seconds_until_local_time,
+    seconds_until_wake_up_time,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +103,6 @@ def reschedule_slideshow_job(
         first=decision.seconds,
         name=JOB_NAME,
     )
-    # Sync the displayed-at timestamp so /list countdown matches the new timer
-    services.database.set_setting("current_image_displayed_at", utcnow_iso())
     _set_next_fire_decision(services, decision)
     logger.info("Slideshow job rescheduled with interval %ds, first in %ds", interval_seconds, decision.seconds)
 
@@ -106,15 +114,7 @@ def _get_scheduled_time(services) -> str | None:
 
 def _seconds_until_scheduled_occurrence(time_str: str, occurrence_index: int = 0) -> int:
     """Seconds from now until the next occurrence of HH:MM, optionally N days later."""
-    h, m = time_str.split(":")
-    target_time = dt_time(int(h), int(m))
-    now = datetime.now()
-    target = now.replace(hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    if occurrence_index > 0:
-        target += timedelta(days=occurrence_index)
-    return max(1, int((target - now).total_seconds()))
+    return seconds_until_local_time(time_str, occurrence_index)
 
 
 def _seconds_until_time(time_str: str) -> int:
@@ -155,37 +155,19 @@ def compute_next_fire_decision(services, active_orientation: str | None = None) 
 def _seconds_until_wake_up(schedule: tuple[str, str]) -> int:
     """Seconds from now until the sleep window's wake-up time."""
     _, wake_up_str = schedule
-    wh, wm = wake_up_str.split(":")
-    wake_up = dt_time(int(wh), int(wm))
-    now = datetime.now()
-    target = now.replace(hour=wake_up.hour, minute=wake_up.minute, second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    return max(1, int((target - now).total_seconds()))
+    return seconds_until_wake_up_time(wake_up_str)
 
 
 def _is_in_sleep_window(schedule: tuple[str, str]) -> bool:
     """Check if current local time falls inside the sleep window."""
     sleep_start_str, wake_up_str = schedule
     try:
-        sh, sm = sleep_start_str.split(":")
-        wh, wm = wake_up_str.split(":")
-        sleep_start = dt_time(int(sh), int(sm))
-        wake_up = dt_time(int(wh), int(wm))
+        return is_in_local_time_window(sleep_start_str, wake_up_str)
     except (ValueError, AttributeError):
         return False
 
-    now = datetime.now().time()
 
-    if sleep_start > wake_up:
-        # Overnight window, e.g. 22:00-08:00
-        return now >= sleep_start or now < wake_up
-    else:
-        # Same-day window, e.g. 13:00-15:00
-        return sleep_start <= now < wake_up
-
-
-async def _try_display_next_rendered(context, services, lock) -> bool:
+async def _try_display_next_rendered(context, services) -> bool:
     """Try to display the next rendered (cooldown-queued) image. Returns True if displayed."""
     active_orientation = services.display.current_orientation()
     rendered = services.database.get_oldest_rendered_image_for_orientation(active_orientation)
@@ -219,13 +201,16 @@ async def _try_display_next_rendered(context, services, lock) -> bool:
             )
             return True
 
+    begin_display_transition(services.database, rendered.image_id, "slideshow")
     result = await _display_target(services, rendered)
     if result.success:
         rendered.status = "displayed"
         rendered.last_error = None
-        services.database.upsert_image(rendered)
-        services.database.set_setting("current_image_displayed_at", utcnow_iso())
-        services.database.set_setting("last_new_image_displayed_at", utcnow_iso())
+        commit_display_success(
+            services.database,
+            rendered,
+            mark_new_image=True,
+        )
         logger.info("Displayed rendered image %s from cooldown queue", rendered.image_id)
 
         # If more rendered images are waiting, use cooldown as next interval
@@ -234,7 +219,10 @@ async def _try_display_next_rendered(context, services, lock) -> bool:
     else:
         rendered.status = "display_failed"
         rendered.last_error = result.message
-        services.database.upsert_image(rendered)
+        services.database.apply_image_and_settings(
+            rendered,
+            clear_keys=DISPLAY_TRANSITION_KEYS,
+        )
         logger.warning("Failed to display rendered image %s: %s", rendered.image_id, result.message)
         _reschedule_for(
             context.application,
@@ -296,7 +284,7 @@ async def _advance_slideshow(context) -> None:
 
     async with lock:
         # Priority: display rendered (cooldown-queued) images first
-        if await _try_display_next_rendered(context, services, lock):
+        if await _try_display_next_rendered(context, services):
             return
 
         # Normal rotation
@@ -336,14 +324,20 @@ async def _advance_slideshow(context) -> None:
             )
             return
 
+        begin_display_transition(services.database, target.image_id, "slideshow")
         result = await _display_target(services, target)
 
         if result.success:
-            services.database.set_setting("current_image_displayed_at", utcnow_iso())
+            commit_display_success(
+                services.database,
+                target,
+                mark_new_image=False,
+            )
             _reschedule_for(context.application, compute_next_fire_decision(services, active_orientation))
             logger.info("Auto-advanced to image %s", target.image_id)
         else:
             logger.warning("Auto-advance failed: %s", result.message)
+            clear_display_transition(services.database)
             _reschedule_for(
                 context.application,
                 NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="display_error", detail=result.message),

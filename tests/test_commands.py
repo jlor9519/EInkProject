@@ -121,6 +121,64 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update.callback_query.caption_edits, [])
         self.assertEqual(update.callback_query.text_edits, [])
 
+    async def test_delete_current_image_keeps_original_row_when_replacement_display_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            current_original = tmpdir_path / "incoming" / "img-1.jpg"
+            current_original.parent.mkdir(parents=True, exist_ok=True)
+            current_original.write_bytes(b"current")
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-1"}),
+                encoding="utf-8",
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=111,
+                    local_original_path=str(current_original),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Current",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                )
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-2",
+                    telegram_file_id="file-2",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "missing-img-2.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Replacement",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:10:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                )
+            )
+
+            update = _FakeUpdate(data="del|y|img-1", has_media=False)
+            context = _FakeContext(services)
+
+            await _delete_confirm_callback(update, context)
+
+            self.assertIsNotNone(services.database.get_image_by_id("img-1"))
+            self.assertIsNotNone(services.database.get_image_by_id("img-2"))
+            self.assertTrue(current_original.exists())
+            self.assertEqual(
+                update.callback_query.text_edits,
+                ["Aktuelles Bild konnte nicht ersetzt werden. Anzeige fehlgeschlagen: Bilddatei für img-2 nicht mehr vorhanden."],
+            )
+
     async def test_status_and_list_use_active_orientation_library(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -251,6 +309,22 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Modus: Intervall", reply)
             self.assertNotIn("Wechsel in ca. weniger als 1 Minute", reply)
             self.assertNotEqual(services.database.get_setting("slideshow_next_fire_at"), "2000-01-01T00:00:00+00:00")
+
+    async def test_status_shows_runtime_settings_degraded_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            services.display.runtime_settings_diagnostics = lambda: {
+                "degraded": True,
+                "message": "Geräteeinstellungen aus Cache aktiv",
+            }
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await status_command(update, context)
+
+            reply = update.effective_message.replies[0]
+            self.assertIn("Warnungen:", reply)
+            self.assertIn("Geräteeinstellungen aus Cache aktiv", reply)
 
     async def test_list_shows_cooldown_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

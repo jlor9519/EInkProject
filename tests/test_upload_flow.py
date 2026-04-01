@@ -6,11 +6,20 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from telegram.error import TimedOut
 from telegram.ext import ConversationHandler
 
-from app.conversations import PENDING_SUBMISSION_KEY, WAITING_FOR_TEXT_CHOICE, _submit_photo, photo_button_callback, photo_entry, process_queued_upload
+from app.conversations import (
+    PENDING_SUBMISSION_KEY,
+    WAITING_FOR_CAPTION,
+    WAITING_FOR_TEXT_CHOICE,
+    _submit_photo,
+    photo_button_callback,
+    photo_entry,
+    process_queued_upload,
+)
 from app.database import Database
 from app.models import DisplayResult, ImageRecord
 
@@ -72,6 +81,28 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
 
             record = services.database.get_image_by_id("img-1")
             self.assertEqual(record.orientation_bucket, "vertical")
+
+    async def test_photo_date_today_uses_local_date_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            application = _FakeApplication(services)
+            context = _FakeContext(application)
+            context.user_data[PENDING_SUBMISSION_KEY] = {
+                "image_id": "img-1",
+                "telegram_file_id": "file-1",
+                "original_path": str(tmpdir_path / "incoming" / "img-1.jpg"),
+                "caption": "",
+                "orientation_bucket": "horizontal",
+            }
+            update = _FakeCallbackUpdate(data="photo_date_today", user_id=1, chat_id=101)
+            update.callback_query.message = _FakeMessage(photo_token="one")
+
+            with patch("app.conversations.local_today_iso", return_value="2030-01-02"):
+                result = await photo_button_callback(update, context)
+
+            self.assertEqual(result, WAITING_FOR_CAPTION)
+            self.assertEqual(context.user_data[PENDING_SUBMISSION_KEY]["taken_at"], "2030-01-02")
 
     async def test_photo_entry_and_submit_queue_multiple_users_fifo(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

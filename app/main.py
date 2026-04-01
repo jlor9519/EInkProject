@@ -52,12 +52,13 @@ def main() -> None:
         auth=AuthService(database),
         storage=storage,
         renderer=RenderService(config.display),
-        display=InkyPiAdapter(config.inkypi, config.storage, config.display),
+        display=InkyPiAdapter(config.inkypi, config.storage, config.display, database=database),
     )
 
     logger.info("Starting Telegram photo frame bot")
+    logger.info("Pending Telegram updates will be preserved across restarts")
     application = build_application(services)
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

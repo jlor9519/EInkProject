@@ -26,6 +26,13 @@ class Database:
         self._connection = sqlite3.connect(self.db_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        self._configure_connection()
+
+    def _configure_connection(self) -> None:
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute("PRAGMA busy_timeout=5000")
+        self._connection.execute("PRAGMA synchronous=NORMAL")
+        self._connection.execute("PRAGMA foreign_keys=ON")
 
     def close(self) -> None:
         self._connection.close()
@@ -106,9 +113,40 @@ class Database:
         logger.info("Database initialized at %s", self.db_path)
 
     def healthcheck(self) -> bool:
+        details = self.health_details()
+        return bool(details["read_ok"] and details["write_ok"])
+
+    def health_details(self) -> dict[str, bool]:
         with self._lock:
-            row = self._connection.execute("SELECT 1").fetchone()
-            return bool(row and row[0] == 1)
+            read_ok = False
+            write_ok = False
+            try:
+                row = self._connection.execute("SELECT 1").fetchone()
+                read_ok = bool(row and row[0] == 1)
+            except sqlite3.DatabaseError:
+                logger.exception("Database read healthcheck failed")
+
+            if read_ok:
+                try:
+                    self._connection.execute("SAVEPOINT healthcheck")
+                    self._connection.execute(
+                        """
+                        INSERT INTO settings(key, value) VALUES(?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        ("__healthcheck__", utcnow_iso()),
+                    )
+                    self._connection.execute("ROLLBACK TO healthcheck")
+                    self._connection.execute("RELEASE healthcheck")
+                    write_ok = True
+                except sqlite3.DatabaseError:
+                    logger.exception("Database write healthcheck failed")
+                    try:
+                        self._connection.execute("ROLLBACK")
+                    except sqlite3.DatabaseError:
+                        logger.exception("Database rollback after failed healthcheck also failed")
+
+            return {"read_ok": read_ok, "write_ok": write_ok}
 
     def ensure_user(
         self,
@@ -189,53 +227,26 @@ class Database:
 
     def upsert_image(self, record: ImageRecord) -> None:
         with self._lock:
-            self._connection.execute(
-                """
-                INSERT INTO images (
-                    image_id,
-                    telegram_file_id,
-                    telegram_chat_id,
-                    local_original_path,
-                    local_rendered_path,
-                    location,
-                    taken_at,
-                    caption,
-                    uploaded_by,
-                    created_at,
-                    status,
-                    last_error,
-                    orientation_bucket
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(image_id) DO UPDATE SET
-                    telegram_file_id = excluded.telegram_file_id,
-                    telegram_chat_id = excluded.telegram_chat_id,
-                    local_original_path = excluded.local_original_path,
-                    local_rendered_path = excluded.local_rendered_path,
-                    location = excluded.location,
-                    taken_at = excluded.taken_at,
-                    caption = excluded.caption,
-                    uploaded_by = excluded.uploaded_by,
-                    created_at = excluded.created_at,
-                    status = excluded.status,
-                    last_error = excluded.last_error,
-                    orientation_bucket = excluded.orientation_bucket
-                """,
-                (
-                    record.image_id,
-                    record.telegram_file_id,
-                    record.telegram_chat_id,
-                    record.local_original_path,
-                    record.local_rendered_path,
-                    record.location,
-                    record.taken_at,
-                    record.caption,
-                    record.uploaded_by,
-                    record.created_at,
-                    record.status,
-                    record.last_error,
-                    record.orientation_bucket,
-                ),
-            )
+            self._upsert_image_locked(record)
+            self._connection.commit()
+
+    def apply_image_and_settings(
+        self,
+        record: ImageRecord | None = None,
+        *,
+        settings: dict[str, str | None] | None = None,
+        clear_keys: tuple[str, ...] = (),
+    ) -> None:
+        with self._lock:
+            if record is not None:
+                self._upsert_image_locked(record)
+            if settings:
+                self._set_settings_locked(settings)
+            if clear_keys:
+                self._connection.executemany(
+                    "DELETE FROM settings WHERE key = ?",
+                    ((key,) for key in clear_keys),
+                )
             self._connection.commit()
 
     def get_latest_image(self) -> ImageRecord | None:
@@ -333,12 +344,13 @@ class Database:
             ).fetchall()
             return [self._row_to_maintenance_job(row) for row in rows]
 
-    def recover_stale_update_jobs(
+    def recover_stale_maintenance_jobs(
         self,
         *,
+        kind: str,
         max_queued_age_seconds: int | None = None,
         max_running_age_seconds: int | None = None,
-        reason: str = "stale maintenance job recovered after restart",
+        reason: str,
     ) -> list[MaintenanceJobRecord]:
         finished_at = utcnow_iso()
         now = datetime.now(timezone.utc)
@@ -346,9 +358,10 @@ class Database:
             rows = self._connection.execute(
                 """
                 SELECT * FROM maintenance_jobs
-                WHERE kind = 'update' AND status IN ('queued', 'running')
+                WHERE kind = ? AND status IN ('queued', 'running')
                 ORDER BY created_at ASC
-                """
+                """,
+                (kind,),
             ).fetchall()
             if not rows:
                 return []
@@ -356,7 +369,7 @@ class Database:
             job_ids = [
                 row["job_id"]
                 for row in rows
-                if self._is_stale_update_row(
+                if self._is_stale_maintenance_row(
                     row,
                     now=now,
                     max_queued_age_seconds=max_queued_age_seconds,
@@ -387,6 +400,20 @@ class Database:
                 job_ids,
             ).fetchall()
             return [self._row_to_maintenance_job(row) for row in updated_rows]
+
+    def recover_stale_update_jobs(
+        self,
+        *,
+        max_queued_age_seconds: int | None = None,
+        max_running_age_seconds: int | None = None,
+        reason: str = "stale maintenance job recovered after restart",
+    ) -> list[MaintenanceJobRecord]:
+        return self.recover_stale_maintenance_jobs(
+            kind="update",
+            max_queued_age_seconds=max_queued_age_seconds,
+            max_running_age_seconds=max_running_age_seconds,
+            reason=reason,
+        )
 
     def get_unnotified_finished_maintenance_jobs(self) -> list[MaintenanceJobRecord]:
         with self._lock:
@@ -584,7 +611,7 @@ class Database:
             self._connection.commit()
 
     @staticmethod
-    def _is_stale_update_row(
+    def _is_stale_maintenance_row(
         row: sqlite3.Row,
         *,
         now: datetime,
@@ -632,6 +659,68 @@ class Database:
             ).fetchall()
             self._connection.commit()
             return [self._row_to_image(row) for row in rows]
+
+    def reconcile_runtime_state(
+        self,
+        current_image_id: str | None,
+        *,
+        transition_keys: tuple[str, ...] = (),
+    ) -> list[ImageRecord]:
+        promoted_to_displayed = False
+        with self._lock:
+            if current_image_id:
+                current_row = self._connection.execute(
+                    "SELECT * FROM images WHERE image_id = ?",
+                    (current_image_id,),
+                ).fetchone()
+                if current_row is not None:
+                    current_status = str(current_row["status"] or "")
+                    current_last_error = current_row["last_error"]
+                    if current_status not in self._DISPLAYED_STATUSES:
+                        promoted_status = "displayed_with_warnings" if current_last_error else "displayed"
+                        self._connection.execute(
+                            """
+                            UPDATE images
+                            SET status = ?
+                            WHERE image_id = ?
+                            """,
+                            (promoted_status, current_image_id),
+                        )
+                        promoted_to_displayed = True
+                    displayed_at = self._connection.execute(
+                        "SELECT value FROM settings WHERE key = ?",
+                        ("current_image_displayed_at",),
+                    ).fetchone()
+                    if displayed_at is None:
+                        self._set_settings_locked({"current_image_displayed_at": utcnow_iso()})
+
+            if current_image_id:
+                self._connection.execute(
+                    "UPDATE images SET status = 'queued' WHERE status = 'processing' AND image_id != ?",
+                    (current_image_id,),
+                )
+            else:
+                self._connection.execute(
+                    "UPDATE images SET status = 'queued' WHERE status = 'processing'"
+                )
+
+            if transition_keys:
+                self._connection.executemany(
+                    "DELETE FROM settings WHERE key = ?",
+                    ((key,) for key in transition_keys),
+                )
+
+            rows = self._connection.execute(
+                "SELECT * FROM images WHERE status = 'queued' ORDER BY created_at ASC"
+            ).fetchall()
+            self._connection.commit()
+
+        if promoted_to_displayed:
+            logger.warning(
+                "Recovered display state from payload by promoting %s to displayed on startup",
+                current_image_id,
+            )
+        return [self._row_to_image(row) for row in rows]
 
     def get_oldest_rendered_image(self) -> ImageRecord | None:
         """Return the oldest image with status 'rendered' (waiting for display)."""
@@ -782,13 +871,17 @@ class Database:
 
     def set_setting(self, key: str, value: str) -> None:
         with self._lock:
-            self._connection.execute(
-                """
-                INSERT INTO settings(key, value) VALUES(?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                """,
-                (key, value),
-            )
+            self._set_settings_locked({key: value})
+            self._connection.commit()
+
+    def set_settings(self, values: dict[str, str | None]) -> None:
+        with self._lock:
+            self._set_settings_locked(values)
+            self._connection.commit()
+
+    def delete_setting(self, key: str) -> None:
+        with self._lock:
+            self._connection.execute("DELETE FROM settings WHERE key = ?", (key,))
             self._connection.commit()
 
     @staticmethod
@@ -802,3 +895,65 @@ class Database:
         if active_orientation not in ACTIVE_ORIENTATIONS:
             return ""
         return " AND orientation_bucket IN (?, ?)"
+
+    def _upsert_image_locked(self, record: ImageRecord) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO images (
+                image_id,
+                telegram_file_id,
+                telegram_chat_id,
+                local_original_path,
+                local_rendered_path,
+                location,
+                taken_at,
+                caption,
+                uploaded_by,
+                created_at,
+                status,
+                last_error,
+                orientation_bucket
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(image_id) DO UPDATE SET
+                telegram_file_id = excluded.telegram_file_id,
+                telegram_chat_id = excluded.telegram_chat_id,
+                local_original_path = excluded.local_original_path,
+                local_rendered_path = excluded.local_rendered_path,
+                location = excluded.location,
+                taken_at = excluded.taken_at,
+                caption = excluded.caption,
+                uploaded_by = excluded.uploaded_by,
+                created_at = excluded.created_at,
+                status = excluded.status,
+                last_error = excluded.last_error,
+                orientation_bucket = excluded.orientation_bucket
+            """,
+            (
+                record.image_id,
+                record.telegram_file_id,
+                record.telegram_chat_id,
+                record.local_original_path,
+                record.local_rendered_path,
+                record.location,
+                record.taken_at,
+                record.caption,
+                record.uploaded_by,
+                record.created_at,
+                record.status,
+                record.last_error,
+                record.orientation_bucket,
+            ),
+        )
+
+    def _set_settings_locked(self, values: dict[str, str | None]) -> None:
+        for key, value in values.items():
+            if value is None:
+                self._connection.execute("DELETE FROM settings WHERE key = ?", (key,))
+                continue
+            self._connection.execute(
+                """
+                INSERT INTO settings(key, value) VALUES(?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, value),
+            )

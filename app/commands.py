@@ -11,7 +11,14 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from app.auth import require_admin, require_whitelist
-from app.database import utcnow_iso
+from app.display_state import (
+    DISPLAY_TRANSITION_KEYS,
+    begin_display_transition,
+    clear_display_transition,
+    commit_display_success,
+    read_current_payload_image_id,
+)
+from app.fs_utils import safe_unlink
 from app.models import AppServices, DisplayRequest, DisplayResult, ImageRecord
 from app.orientation import format_orientation_label, orientation_matches
 
@@ -116,9 +123,28 @@ def _build_help_text(is_admin: bool) -> str:
 async def _render_status_text(services: AppServices) -> str:
     active_orientation = get_active_orientation(services)
 
-    db_ok = services.database.healthcheck()
-    storage_ok = services.storage.healthcheck()
+    db_health_fn = getattr(services.database, "health_details", None)
+    if callable(db_health_fn):
+        db_details = db_health_fn()
+    else:
+        db_ok_fallback = bool(services.database.healthcheck())
+        db_details = {"read_ok": db_ok_fallback, "write_ok": db_ok_fallback}
+    db_ok = bool(db_details["read_ok"] and db_details["write_ok"])
+
+    storage_health_fn = getattr(services.storage, "health_details", None)
+    if callable(storage_health_fn):
+        storage_details = storage_health_fn()
+    else:
+        storage_ok_fallback = bool(services.storage.healthcheck())
+        storage_details = {
+            "paths_exist": storage_ok_fallback,
+            "writable": storage_ok_fallback,
+            "free_bytes": None,
+        }
+    storage_ok = bool(storage_details["paths_exist"] and storage_details["writable"])
     payload_ok = services.display.payload_exists()
+    diagnostics_fn = getattr(services.display, "runtime_settings_diagnostics", None)
+    runtime_diagnostics = diagnostics_fn() if callable(diagnostics_fn) else {"degraded": False, "message": ""}
 
     inkypi_reachable = await asyncio.to_thread(services.display.ping_inkypi)
     if inkypi_reachable is None:
@@ -132,6 +158,7 @@ async def _render_status_text(services: AppServices) -> str:
     rendered_count = services.database.count_rendered_images(active_orientation)
     displayed_at = services.database.get_setting("current_image_displayed_at")
     user_count = services.database.count_whitelisted_users()
+    free_space = _format_free_space(storage_details["free_bytes"])
 
     image_lines = [
         f"- Bibliothek: {format_orientation_label(active_orientation)}",
@@ -141,18 +168,38 @@ async def _render_status_text(services: AppServices) -> str:
     if rendered_count > 0:
         image_lines.append(f"- Warteschlange: {rendered_count} neue{'s' if rendered_count == 1 else ''} Bild{'er' if rendered_count != 1 else ''} wartend")
 
+    service_lines = [
+        f"- Datenbank: {'✓ ok' if db_ok else '✗ Fehler'}",
+        f"- Datenbank schreiben: {'✓ ok' if db_details['write_ok'] else '✗ Fehler'}",
+        f"- Speicher: {'✓ ok' if storage_ok else '✗ Fehler'}",
+        f"- Speicher schreibbar: {'✓ ok' if storage_details['writable'] else '✗ Fehler'}",
+        f"- Freier Speicher: {free_space}",
+        f"- InkyPi: {inkypi_line}",
+        f"- InkyPi-Payload: {'✓ vorhanden' if payload_ok else '✗ nicht gefunden'}",
+    ]
+
+    warnings: list[str] = []
+    if runtime_diagnostics["degraded"]:
+        warnings.append(str(runtime_diagnostics["message"]))
+
     return "\n".join(
         [
             "Fotorahmen-Status",
             "",
             "Dienste:",
-            f"- Datenbank: {'✓ ok' if db_ok else '✗ Fehler'}",
-            f"- Speicher: {'✓ ok' if storage_ok else '✗ Fehler'}",
-            f"- InkyPi: {inkypi_line}",
-            f"- InkyPi-Payload: {'✓ vorhanden' if payload_ok else '✗ nicht gefunden'}",
+            *service_lines,
             "",
             "Bilder:",
             *image_lines,
+            *(
+                [
+                    "",
+                    "Warnungen:",
+                    *(f"- {warning}" for warning in warnings),
+                ]
+                if warnings
+                else []
+            ),
             "",
             "Nutzer:",
             f"- Freigegebene Nutzer: {user_count}",
@@ -336,7 +383,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if isinstance(pending, dict):
         original_path = pending.get("original_path")
         if original_path:
-            Path(original_path).unlink(missing_ok=True)
+            safe_unlink(original_path, logger=logger)
 
     context.user_data.pop("pending_submission", None)
     await update.effective_message.reply_text("Der aktuelle Upload wurde abgebrochen.")
@@ -366,6 +413,18 @@ def _friendly_display_error(message: str) -> str:
     )):
         return "Display nicht erreichbar. Bitte prüfe die Verbindung zum Pi."
     return f"Anzeige fehlgeschlagen: {message}"
+
+
+def _format_free_space(free_bytes: int | None) -> str:
+    if free_bytes is None:
+        return "unbekannt"
+    if free_bytes >= 1024**3:
+        return f"{free_bytes / (1024**3):.1f} GB"
+    if free_bytes >= 1024**2:
+        return f"{free_bytes / (1024**2):.0f} MB"
+    if free_bytes >= 1024:
+        return f"{free_bytes / 1024:.0f} KB"
+    return f"{free_bytes} B"
 
 
 def _image_label(record: ImageRecord) -> str:
@@ -473,40 +532,44 @@ async def command_action_callback(update: Update, context: ContextTypes.DEFAULT_
 
 async def _display_target(services: AppServices, target: ImageRecord) -> DisplayResult:
     """Render, display, and upload a target image. Caller must hold display_lock."""
-    rendered_path = Path(target.local_rendered_path) if target.local_rendered_path else None
-    original_path = Path(target.local_original_path)
+    try:
+        rendered_path = Path(target.local_rendered_path) if target.local_rendered_path else None
+        original_path = Path(target.local_original_path)
 
-    if rendered_path is None or not rendered_path.exists():
-        if not original_path.exists():
-            return DisplayResult(False, f"Bilddatei für {target.image_id} nicht mehr vorhanden.")
-        rendered_path = services.storage.rendered_path(target.image_id)
-        await asyncio.to_thread(
-            services.renderer.render,
-            original_path,
-            rendered_path,
+        if rendered_path is None or not rendered_path.exists():
+            if not original_path.exists():
+                return DisplayResult(False, f"Bilddatei für {target.image_id} nicht mehr vorhanden.")
+            rendered_path = services.storage.rendered_path(target.image_id)
+            await asyncio.to_thread(
+                services.renderer.render,
+                original_path,
+                rendered_path,
+                location=target.location,
+                taken_at=target.taken_at,
+                caption=target.caption,
+            )
+            target.local_rendered_path = str(rendered_path)
+            services.database.upsert_image(target)
+
+        show_caption = bool(target.caption or target.location or target.taken_at)
+        fit_mode = services.database.get_setting("image_fit_mode") or "fill"
+        display_request = DisplayRequest(
+            image_id=target.image_id,
+            original_path=original_path,
+            composed_path=rendered_path,
             location=target.location,
             taken_at=target.taken_at,
             caption=target.caption,
+            created_at=target.created_at,
+            uploaded_by=target.uploaded_by,
+            show_caption=show_caption,
+            fit_mode=fit_mode,
         )
-        target.local_rendered_path = str(rendered_path)
-        services.database.upsert_image(target)
 
-    show_caption = bool(target.caption or target.location or target.taken_at)
-    fit_mode = services.database.get_setting("image_fit_mode") or "fill"
-    display_request = DisplayRequest(
-        image_id=target.image_id,
-        original_path=original_path,
-        composed_path=rendered_path,
-        location=target.location,
-        taken_at=target.taken_at,
-        caption=target.caption,
-        created_at=target.created_at,
-        uploaded_by=target.uploaded_by,
-        show_caption=show_caption,
-        fit_mode=fit_mode,
-    )
-
-    return await asyncio.to_thread(services.display.display, display_request)
+        return await asyncio.to_thread(services.display.display, display_request)
+    except Exception as exc:
+        logger.exception("Display target failed unexpectedly for %s", target.image_id)
+        return DisplayResult(False, str(exc))
 
 
 async def _navigate(update: Update, context: ContextTypes.DEFAULT_TYPE, direction: str) -> None:
@@ -564,16 +627,25 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
         await message.reply_text("Kein weiteres Bild vorhanden.")
         return
 
-    result = await _display_target(services, target)
-
     total = services.database.count_displayed_images(active_orientation)
     position = services.database.get_displayed_image_position(target.image_id, active_orientation)
+    begin_display_transition(
+        services.database,
+        target.image_id,
+        "manual_next" if direction == "next" else "manual_prev",
+    )
+    result = await _display_target(services, target)
     if result.success:
-        services.database.set_setting("current_image_displayed_at", utcnow_iso())
+        commit_display_success(
+            services.database,
+            target,
+            mark_new_image=False,
+        )
         await message.reply_text(f"Bild {position} von {total}: {target.image_id}")
         from app.slideshow import reschedule_slideshow_job
         reschedule_slideshow_job(context.application)
     else:
+        clear_display_transition(services.database)
         await message.reply_text(_friendly_display_error(result.message))
 
 
@@ -587,20 +659,22 @@ async def _try_promote_next_rendered(
     if rendered is None:
         return None, DisplayResult(False, "")
 
+    begin_display_transition(services.database, rendered.image_id, "manual_next")
     result = await _display_target(services, rendered)
     if result.success:
         rendered.status = "displayed"
         rendered.last_error = None
-        services.database.upsert_image(rendered)
-        now = utcnow_iso()
-        services.database.set_setting("current_image_displayed_at", now)
-        services.database.set_setting("last_new_image_displayed_at", now)
+        commit_display_success(
+            services.database,
+            rendered,
+            mark_new_image=True,
+        )
         from app.slideshow import reschedule_slideshow_job
         reschedule_slideshow_job(context.application)
     else:
         rendered.status = "display_failed"
         rendered.last_error = result.message
-        services.database.upsert_image(rendered)
+        services.database.apply_image_and_settings(rendered, clear_keys=DISPLAY_TRANSITION_KEYS)
     return rendered, result
 
 
@@ -618,14 +692,7 @@ _DELETE_PAGE_SIZE = 10
 
 
 def _get_current_image_id(services: AppServices) -> str | None:
-    payload_path = services.config.storage.current_payload_path
-    if not payload_path.exists():
-        return None
-    try:
-        payload = json.loads(payload_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    return payload.get("image_id") or None
+    return read_current_payload_image_id(services.config.storage.current_payload_path)
 
 
 def _build_delete_page(
@@ -814,16 +881,18 @@ async def _delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT
                 )
                 return
 
-            await _edit_query_message(query, "Wird gelöscht...")
-            services.database.delete_image(image_id)
-            for file_path_str in (record.local_original_path, record.local_rendered_path):
-                if file_path_str:
-                    Path(file_path_str).unlink(missing_ok=True)
-
+            begin_display_transition(services.database, replacement.image_id, "delete_replace")
             result = await _display_target(services, replacement)
             total = services.database.count_displayed_images(active_orientation)
             if result.success:
-                services.database.set_setting("current_image_displayed_at", utcnow_iso())
+                commit_display_success(
+                    services.database,
+                    replacement,
+                    mark_new_image=False,
+                )
+                services.database.delete_image(image_id)
+                for file_path_str in (record.local_original_path, record.local_rendered_path):
+                    safe_unlink(file_path_str, logger=logger)
                 await _edit_query_message(
                     query,
                     f"Bild gelöscht. Zeige jetzt {_image_label(replacement)} ({total} Bilder verbleibend).",
@@ -831,16 +900,16 @@ async def _delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT
                 from app.slideshow import reschedule_slideshow_job
                 reschedule_slideshow_job(context.application)
             else:
+                clear_display_transition(services.database)
                 await _edit_query_message(
                     query,
-                    f"Bild gelöscht. {_friendly_display_error(result.message)}",
+                    f"Aktuelles Bild konnte nicht ersetzt werden. {_friendly_display_error(result.message)}",
                 )
     else:
         # Not the current image — just delete, no display change needed
         services.database.delete_image(image_id)
         for file_path_str in (record.local_original_path, record.local_rendered_path):
-            if file_path_str:
-                Path(file_path_str).unlink(missing_ok=True)
+            safe_unlink(file_path_str, logger=logger)
 
         total = services.database.count_displayed_images(active_orientation)
         await _edit_query_message(

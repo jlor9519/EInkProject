@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -24,8 +23,15 @@ from telegram.ext import (
 from app.auth import require_whitelist
 from app.commands import _delete_query_message, get_display_lock, get_services
 from app.database import utcnow_iso
+from app.display_state import (
+    DISPLAY_TRANSITION_KEYS,
+    begin_display_transition,
+    commit_display_success,
+)
+from app.fs_utils import safe_unlink
 from app.models import DisplayRequest, ImageRecord
 from app.orientation import format_orientation_label, orientation_matches
+from app.time_utils import local_today_iso
 
 (
     WAITING_FOR_TEXT_CHOICE,
@@ -43,7 +49,7 @@ def _discard_pending_submission(context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(pending, dict):
         original_path = pending.get("original_path")
         if original_path:
-            Path(original_path).unlink(missing_ok=True)
+            safe_unlink(original_path, logger=logger)
     context.user_data.pop(PENDING_SUBMISSION_KEY, None)
 
 
@@ -316,7 +322,7 @@ async def photo_button_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return WAITING_FOR_TAKEN_AT
 
     if data == "photo_date_today":
-        pending["taken_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        pending["taken_at"] = local_today_iso()
         await query.edit_message_text(f"Datum: {pending['taken_at']}")
         await query.message.reply_text(
             _caption_prompt(pending),
@@ -531,6 +537,7 @@ async def process_queued_upload(application: Application, image_id: str) -> None
     fit_mode = services.database.get_setting("image_fit_mode") or "fill"
     rendered_path = services.storage.rendered_path(record.image_id)
     show_caption = bool(record.location or record.taken_at or record.caption)
+    display_state_committed = False
 
     try:
         # Always render the image first (no lock needed for rendering)
@@ -587,17 +594,39 @@ async def process_queued_upload(application: Application, image_id: str) -> None
                 services, record, rendered_path, show_caption=show_caption, fit_mode=fit_mode,
             )
             warnings.extend(display_warnings)
-            services.database.upsert_image(record)
             if record.status not in ("failed", "display_failed"):
-                services.database.set_setting("last_new_image_displayed_at", utcnow_iso())
+                commit_display_success(
+                    services.database,
+                    record,
+                    mark_new_image=True,
+                )
+                display_state_committed = True
                 from app.slideshow import reschedule_slideshow_job
-                reschedule_slideshow_job(application)
+                try:
+                    reschedule_slideshow_job(application)
+                except Exception as exc:
+                    logger.exception("Failed to reschedule slideshow after displaying %s", record.image_id)
+                    warning = f"Slideshow-Neuplanung fehlgeschlagen: {exc}"
+                    warnings.append(warning)
+                    record = _append_record_warning(record, warning)
+                    services.database.upsert_image(record)
+            else:
+                services.database.apply_image_and_settings(record, clear_keys=DISPLAY_TRANSITION_KEYS)
     except Exception as exc:
+        if display_state_committed:
+            logger.exception("Post-display processing failed for image %s", record.image_id)
+            warning = f"Nachbearbeitung fehlgeschlagen: {exc}"
+            warnings.append(warning)
+            record = _append_record_warning(record, warning)
+            services.database.upsert_image(record)
+            record = await _notify_completion(application, record, _build_success_reply(record, warnings))
+            services.database.upsert_image(record)
+            return
         logger.exception("Processing failed for image %s", record.image_id)
         record.status = "failed"
         record.last_error = str(exc)
         record.local_rendered_path = str(rendered_path) if rendered_path.exists() else None
-        services.database.upsert_image(record)
+        services.database.apply_image_and_settings(record, clear_keys=DISPLAY_TRANSITION_KEYS)
         record = await _notify_completion(application, record, f"Verarbeitung fehlgeschlagen: {exc}")
         services.database.upsert_image(record)
         return
@@ -649,6 +678,7 @@ async def _display_rendered_image(
         fit_mode=fit_mode,
     )
     logger.info("Sending image %s to display", record.image_id)
+    begin_display_transition(services.database, record.image_id, "upload")
     display_result = await asyncio.to_thread(services.display.display, display_request)
 
     if not display_result.success:
@@ -657,7 +687,6 @@ async def _display_rendered_image(
         record.last_error = display_result.message
         return record, warnings
 
-    services.database.set_setting("current_image_displayed_at", utcnow_iso())
     services.storage.cleanup_rendered_cache()
 
     record.status = "displayed_with_warnings" if warnings else "displayed"

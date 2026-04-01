@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 from urllib import error, parse, request
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,9 @@ INKYPI_SERVICE_NAME = "inkypi.service"
 INKYPI_RESTART_TIMEOUT_SECONDS = 45
 INKYPI_HTTP_READY_TIMEOUT_SECONDS = 30
 DEFAULT_TELEGRAM_FRAME_INSTANCE_NAME = "Telegram Frame"
+RUNTIME_CACHE_ORIENTATION_KEY = "runtime_cache_orientation"
+RUNTIME_CACHE_INTERVAL_KEY = "runtime_cache_slideshow_interval"
+RUNTIME_CACHE_SLEEP_SCHEDULE_KEY = "runtime_cache_sleep_schedule"
 
 
 def _write_device_json(path: Path, updates: dict[str, object]) -> None:
@@ -60,10 +64,17 @@ def _merge_device_settings(existing: dict[str, object], updates: dict[str, objec
 
 
 class InkyPiAdapter:
-    def __init__(self, config: InkyPiConfig, storage: StorageConfig, display: DisplayConfig):
+    def __init__(
+        self,
+        config: InkyPiConfig,
+        storage: StorageConfig,
+        display: DisplayConfig,
+        database: Any | None = None,
+    ):
         self.config = config
         self.storage = storage
         self.display_config = display
+        self.database = database
         self.layout = resolve_inkypi_layout(config.repo_path, config.install_path)
         self._systemctl_bin = shutil.which("systemctl") or "/usr/bin/systemctl"
 
@@ -80,6 +91,28 @@ class InkyPiAdapter:
         if not path.exists():
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def runtime_settings_diagnostics(self) -> dict[str, str | bool]:
+        data, error_text = self._read_device_settings_with_status()
+        if data is not None:
+            return {"degraded": False, "message": ""}
+        cache_available = any(
+            self._read_runtime_cache(key)
+            for key in (
+                RUNTIME_CACHE_ORIENTATION_KEY,
+                RUNTIME_CACHE_INTERVAL_KEY,
+                RUNTIME_CACHE_SLEEP_SCHEDULE_KEY,
+            )
+        )
+        if cache_available:
+            return {
+                "degraded": True,
+                "message": f"Geräteeinstellungen aus Cache aktiv ({error_text or 'device.json nicht lesbar'})",
+            }
+        return {
+            "degraded": True,
+            "message": f"Geräteeinstellungen verwenden Standardwerte ({error_text or 'device.json fehlt'})",
+        }
 
     def apply_device_settings(
         self,
@@ -117,6 +150,8 @@ class InkyPiAdapter:
                 confirmed_settings={},
                 device_config_path=device_config_path,
             )
+
+        self._refresh_runtime_cache_from_data(confirmed)
 
         restart_error = self._restart_inkypi_service()
         if restart_error is not None:
@@ -356,24 +391,51 @@ class InkyPiAdapter:
         return self.storage.current_payload_path.exists()
 
     def current_orientation(self) -> str:
-        try:
-            settings = self.read_device_settings()
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("Failed to read current InkyPi orientation, defaulting to horizontal: %s", exc)
-            return "horizontal"
+        data, error_text = self._read_device_settings_with_status()
+        if data is not None:
+            orientation = str(data.get("orientation") or "horizontal").strip().lower()
+            if orientation in {"horizontal", "vertical"}:
+                self._write_runtime_cache(RUNTIME_CACHE_ORIENTATION_KEY, orientation)
+                return orientation
+            logger.warning("Invalid current InkyPi orientation in device.json: %s", orientation)
 
-        orientation = str(settings.get("orientation") or "horizontal").strip().lower()
-        if orientation not in {"horizontal", "vertical"}:
-            return "horizontal"
-        return orientation
+        cached = (self._read_runtime_cache(RUNTIME_CACHE_ORIENTATION_KEY) or "").strip().lower()
+        if cached in {"horizontal", "vertical"}:
+            if error_text:
+                logger.warning(
+                    "Failed to read current InkyPi orientation, using cached value %s: %s",
+                    cached,
+                    error_text,
+                )
+            return cached
+
+        if error_text:
+            logger.warning("Failed to read current InkyPi orientation, defaulting to horizontal: %s", error_text)
+        return "horizontal"
 
     def get_slideshow_interval(self) -> int:
         """Return the slideshow refresh interval in seconds from device.json, default 86400."""
-        try:
-            data = self.read_device_settings()
-        except (OSError, json.JSONDecodeError):
-            return 86400
-        return self._read_plugin_refresh_interval(data)
+        data, error_text = self._read_device_settings_with_status()
+        if data is not None:
+            interval = self._read_plugin_refresh_interval(data)
+            self._write_runtime_cache(RUNTIME_CACHE_INTERVAL_KEY, str(interval))
+            return interval
+
+        cached = self._read_runtime_cache(RUNTIME_CACHE_INTERVAL_KEY)
+        if cached:
+            try:
+                interval = max(1, int(cached))
+            except (TypeError, ValueError):
+                interval = None
+            else:
+                if error_text:
+                    logger.warning(
+                        "Failed to read slideshow interval from device.json, using cached value %s: %s",
+                        interval,
+                        error_text,
+                    )
+                return interval
+        return 86400
 
     def set_slideshow_interval(self, seconds: int) -> DeviceSettingsApplyResult:
         """Update the Telegram Frame plugin refresh interval in device.json and restart InkyPi."""
@@ -415,22 +477,25 @@ class InkyPiAdapter:
 
     def get_sleep_schedule(self) -> tuple[str, str] | None:
         """Return (sleep_start, wake_up) as 'HH:MM' strings, or None if quiet hours are off."""
-        try:
-            data = self.read_device_settings()
-        except (OSError, json.JSONDecodeError):
-            return None
-        playlist_config = data.get("playlist_config")
-        if not isinstance(playlist_config, dict):
-            return None
-        for playlist in playlist_config.get("playlists", []):
-            if not isinstance(playlist, dict):
-                continue
-            start = str(playlist.get("start_time", "00:00"))
-            end = str(playlist.get("end_time", "24:00"))
-            if start == "00:00" and end in ("24:00", "23:59"):
-                return None
-            # start_time = wake_up, end_time = sleep_start (device.json is "active" window)
-            return (end, start)
+        data, error_text = self._read_device_settings_with_status()
+        if data is not None:
+            schedule = self._extract_sleep_schedule(data)
+            self._write_runtime_cache(
+                RUNTIME_CACHE_SLEEP_SCHEDULE_KEY,
+                self._encode_sleep_schedule(schedule),
+            )
+            return schedule
+
+        cached = self._decode_sleep_schedule(self._read_runtime_cache(RUNTIME_CACHE_SLEEP_SCHEDULE_KEY))
+        if cached is not None:
+            if error_text:
+                logger.warning(
+                    "Failed to read quiet-hours schedule from device.json, using cached value %s-%s: %s",
+                    cached[0],
+                    cached[1],
+                    error_text,
+                )
+            return cached
         return None
 
     def set_sleep_schedule(self, sleep_start: str | None, wake_up: str | None) -> DeviceSettingsApplyResult:
@@ -502,6 +567,20 @@ class InkyPiAdapter:
                     if isinstance(interval, (int, float)) and interval > 0:
                         return int(interval)
         return 86400
+
+    def _extract_sleep_schedule(self, data: dict[str, object]) -> tuple[str, str] | None:
+        playlist_config = data.get("playlist_config")
+        if not isinstance(playlist_config, dict):
+            return None
+        for playlist in playlist_config.get("playlists", []):
+            if not isinstance(playlist, dict):
+                continue
+            start = str(playlist.get("start_time", "00:00"))
+            end = str(playlist.get("end_time", "24:00"))
+            if start == "00:00" and end in ("24:00", "23:59"):
+                return None
+            return (end, start)
+        return None
 
     def _sync_active_plugin_instance(self, payload_path: Path) -> DisplayResult | None:
         device_config_path = self._device_config_path()
@@ -603,6 +682,54 @@ class InkyPiAdapter:
         except OSError as exc:
             logger.warning("OS error syncing Telegram Frame plugin instance: %s", exc)
             return DisplayResult(False, f"Failed to update InkyPi plugin settings: {exc}")
+
+    def _read_device_settings_with_status(self) -> tuple[dict[str, object] | None, str | None]:
+        path = self._device_config_path()
+        if not path.exists():
+            return None, "device.json fehlt"
+        try:
+            return json.loads(path.read_text(encoding="utf-8")), None
+        except (OSError, json.JSONDecodeError) as exc:
+            return None, str(exc)
+
+    def _refresh_runtime_cache_from_data(self, data: dict[str, object]) -> None:
+        orientation = str(data.get("orientation") or "horizontal").strip().lower()
+        if orientation not in {"horizontal", "vertical"}:
+            orientation = "horizontal"
+        self._write_runtime_cache(RUNTIME_CACHE_ORIENTATION_KEY, orientation)
+        self._write_runtime_cache(
+            RUNTIME_CACHE_INTERVAL_KEY,
+            str(self._read_plugin_refresh_interval(data)),
+        )
+        self._write_runtime_cache(
+            RUNTIME_CACHE_SLEEP_SCHEDULE_KEY,
+            self._encode_sleep_schedule(self._extract_sleep_schedule(data)),
+        )
+
+    def _write_runtime_cache(self, key: str, value: str) -> None:
+        if self.database is None:
+            return
+        self.database.set_setting(key, value)
+
+    def _read_runtime_cache(self, key: str) -> str | None:
+        if self.database is None:
+            return None
+        return self.database.get_setting(key)
+
+    @staticmethod
+    def _encode_sleep_schedule(schedule: tuple[str, str] | None) -> str:
+        if schedule is None:
+            return ""
+        return f"{schedule[0]}|{schedule[1]}"
+
+    @staticmethod
+    def _decode_sleep_schedule(raw: str | None) -> tuple[str, str] | None:
+        if not raw:
+            return None
+        parts = raw.split("|", 1)
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return None
+        return parts[0], parts[1]
 
     def _format_refresh_command(self, payload_path: Path, image_path: Path) -> list[str]:
         command = self.config.refresh_command.format(

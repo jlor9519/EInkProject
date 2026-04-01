@@ -24,8 +24,39 @@ MAINTENANCE_KINDS = {"restart", "update"}
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 UPDATE_QUEUED_STALE_SECONDS = 60
 UPDATE_RUNNING_STALE_SECONDS = 600
+RESTART_QUEUED_STALE_SECONDS = 60
+RESTART_RUNNING_STALE_SECONDS = 120
 STARTUP_STALE_UPDATE_REASON = "stale maintenance job recovered after restart"
-PREFLIGHT_STALE_UPDATE_REASON = "stale maintenance job recovered before new update request"
+PREFLIGHT_STALE_UPDATE_REASON = "stale maintenance job recovered before new maintenance request"
+
+
+async def _recover_stale_maintenance_jobs(application: Application, *, reason: str) -> list[MaintenanceJobRecord]:
+    services: AppServices = application.bot_data["services"]
+    recovered_jobs: list[MaintenanceJobRecord] = []
+    recovered_jobs.extend(
+        services.database.recover_stale_maintenance_jobs(
+            kind="restart",
+            max_queued_age_seconds=RESTART_QUEUED_STALE_SECONDS if reason == PREFLIGHT_STALE_UPDATE_REASON else None,
+            max_running_age_seconds=RESTART_RUNNING_STALE_SECONDS if reason == PREFLIGHT_STALE_UPDATE_REASON else None,
+            reason=reason,
+        )
+    )
+    recovered_jobs.extend(
+        services.database.recover_stale_update_jobs(
+            max_queued_age_seconds=UPDATE_QUEUED_STALE_SECONDS if reason == PREFLIGHT_STALE_UPDATE_REASON else None,
+            max_running_age_seconds=UPDATE_RUNNING_STALE_SECONDS if reason == PREFLIGHT_STALE_UPDATE_REASON else None,
+            reason=reason,
+        )
+    )
+    for recovered_job in recovered_jobs:
+        logger.warning(
+            "Recovered stale maintenance job %s (%s/%s)",
+            recovered_job.job_id,
+            recovered_job.kind,
+            recovered_job.status,
+        )
+        await _notify_maintenance_job(application, recovered_job)
+    return recovered_jobs
 
 
 def get_maintenance_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
@@ -104,19 +135,10 @@ async def maintenance_confirm_callback(update: Update, context: ContextTypes.DEF
 
     lock = get_maintenance_lock(context)
     async with lock:
-        if job_kind == "update":
-            recovered_jobs = services.database.recover_stale_update_jobs(
-                max_queued_age_seconds=UPDATE_QUEUED_STALE_SECONDS,
-                max_running_age_seconds=UPDATE_RUNNING_STALE_SECONDS,
-                reason=PREFLIGHT_STALE_UPDATE_REASON,
-            )
-            for recovered_job in recovered_jobs:
-                logger.warning(
-                    "Recovered stale maintenance job %s (%s) before starting a new update",
-                    recovered_job.job_id,
-                    recovered_job.status,
-                )
-                await _notify_maintenance_job(context.application, recovered_job)
+        await _recover_stale_maintenance_jobs(
+            context.application,
+            reason=PREFLIGHT_STALE_UPDATE_REASON,
+        )
 
         active_job = services.database.get_active_maintenance_job()
         if active_job is not None:
@@ -180,15 +202,10 @@ async def notify_maintenance_updates(application: Application) -> None:
     for job in reboot_jobs:
         await _notify_maintenance_job(application, job)
 
-    stale_update_jobs = services.database.recover_stale_update_jobs(
+    await _recover_stale_maintenance_jobs(
+        application,
         reason=STARTUP_STALE_UPDATE_REASON,
     )
-    for job in stale_update_jobs:
-        logger.warning(
-            "Recovered stale maintenance job %s (%s) with prior status cleared on startup",
-            job.job_id,
-            job.kind,
-        )
 
     finished_jobs = services.database.get_unnotified_finished_maintenance_jobs()
     for job in finished_jobs:

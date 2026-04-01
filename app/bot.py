@@ -28,6 +28,7 @@ from app.commands import (
     whitelist_command,
 )
 from app.conversations import build_photo_conversation, process_queued_upload
+from app.display_state import DISPLAY_TRANSITION_KEYS, read_current_payload_image_id
 from app.maintenance import (
     MAINTENANCE_LOCK_KEY,
     maintenance_cancel_callback,
@@ -46,13 +47,17 @@ UPLOAD_WORKER_TASK_KEY = "upload_worker_task"
 
 
 async def _post_init(application: Application) -> None:
+    services = application.bot_data["services"]
+    current_image_id = read_current_payload_image_id(services.config.storage.current_payload_path)
+    pending = services.database.reconcile_runtime_state(
+        current_image_id,
+        transition_keys=DISPLAY_TRANSITION_KEYS,
+    )
     schedule_slideshow_job(application)
     application.bot_data[UPLOAD_WORKER_TASK_KEY] = asyncio.create_task(
         _upload_worker(application),
         name="photo-upload-worker",
     )
-    services = application.bot_data["services"]
-    pending = services.database.reconcile_pending_images()
     queue: asyncio.Queue[str] = application.bot_data[UPLOAD_QUEUE_KEY]
     for record in pending:
         await queue.put(record.image_id)
