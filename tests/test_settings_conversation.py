@@ -12,6 +12,7 @@ from telegram.ext import ConversationHandler
 from app.database import Database
 from app.models import DeviceSettingsApplyResult, DisplayResult, ImageRecord
 from app.settings_conversation import (
+    PENDING_IMAGE_TUNING_FIELD_KEY,
     PENDING_SETTINGS_KEY,
     WAITING_FOR_SETTINGS_CHOICE,
     WAITING_FOR_SETTINGS_VALUE,
@@ -45,10 +46,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply, "Einstellungen")
         markup = update.effective_message.reply_markups[0]
         labels = [button.text for row in markup.inline_keyboard for button in row]
-        self.assertIn("Sättigung: 1.4", labels)
-        self.assertIn("Kontrast: 1.4", labels)
-        self.assertIn("Schärfe: 1.2", labels)
-        self.assertIn("Helligkeit: 1.1", labels)
+        self.assertIn("Bildoptimierung", labels)
         self.assertIn("Ausrichtung: Hochformat", labels)
         self.assertIn("Bildanpassung: Zuschneiden", labels)
         self.assertIn("Täglicher Wechsel: Deaktiviert", labels)
@@ -57,13 +55,13 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_settings_callback_opens_prompt_from_button(self) -> None:
         services = _FakeServices(is_admin=True)
-        update = _FakeCallbackUpdate("settings|select|4", user_id=11)
+        update = _FakeCallbackUpdate("settings|select|1", user_id=11)
         context = _FakeContext(services)
 
         result = await settings_callback(update, context)
 
         self.assertEqual(result, WAITING_FOR_SETTINGS_VALUE)
-        self.assertEqual(context.user_data[PENDING_SETTINGS_KEY], 4)
+        self.assertEqual(context.user_data[PENDING_SETTINGS_KEY], 1)
         self.assertIn("Wähle den neuen Wert per Button.", update.callback_query.text_edits[0])
         labels = [button.text for row in update.callback_query.text_edit_markups[0].inline_keyboard for button in row]
         self.assertIn("Hochformat", labels)
@@ -71,11 +69,29 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Zurück", labels)
         self.assertIn("Abbrechen", labels)
 
+    async def test_settings_callback_opens_image_tuning_submenu(self) -> None:
+        services = _FakeServices(is_admin=True)
+        update = _FakeCallbackUpdate("settings|select|0", user_id=11)
+        context = _FakeContext(services)
+
+        result = await settings_callback(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
+        self.assertEqual(update.callback_query.text_edits[0], "Bildoptimierung")
+        labels = [button.text for row in update.callback_query.text_edit_markups[0].inline_keyboard for button in row]
+        self.assertIn("Sättigung: 1.4", labels)
+        self.assertIn("Kontrast: 1.4", labels)
+        self.assertIn("Schärfe: 1.2", labels)
+        self.assertIn("Helligkeit: 1.1", labels)
+        self.assertIn("Speichern", labels)
+        self.assertIn("Zurück", labels)
+        self.assertIn("Abbrechen", labels)
+
     async def test_settings_callback_back_returns_to_menu(self) -> None:
         services = _FakeServices(is_admin=True)
         update = _FakeCallbackUpdate("settings|back", user_id=11)
         context = _FakeContext(services)
-        context.user_data[PENDING_SETTINGS_KEY] = 4
+        context.user_data[PENDING_SETTINGS_KEY] = 1
 
         result = await settings_callback(update, context)
 
@@ -87,7 +103,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         services = _FakeServices(is_admin=True)
         update = _FakeCallbackUpdate("settings|close", user_id=11)
         context = _FakeContext(services)
-        context.user_data[PENDING_SETTINGS_KEY] = 4
+        context.user_data[PENDING_SETTINGS_KEY] = 1
 
         result = await settings_callback(update, context)
 
@@ -102,7 +118,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
 
         # Set a scheduled time
         update = _FakeUpdate("08:00", user_id=11)
-        context.user_data[PENDING_SETTINGS_KEY] = 9  # index 9 = scheduled_time
+        context.user_data[PENDING_SETTINGS_KEY] = 6
 
         result = await receive_settings_value(update, context)
 
@@ -116,7 +132,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         context = _FakeContext(services)
 
         update = _FakeUpdate("keine", user_id=11)
-        context.user_data[PENDING_SETTINGS_KEY] = 9
+        context.user_data[PENDING_SETTINGS_KEY] = 6
 
         result = await receive_settings_value(update, context)
 
@@ -129,7 +145,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         context = _FakeContext(services)
 
         update = _FakeUpdate("25:00", user_id=11)
-        context.user_data[PENDING_SETTINGS_KEY] = 9
+        context.user_data[PENDING_SETTINGS_KEY] = 6
 
         result = await receive_settings_value(update, context)
 
@@ -151,11 +167,23 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         labels = [button.text for row in update.effective_message.reply_markups[0].inline_keyboard for button in row]
         self.assertIn("Täglicher Wechsel: 08:30", labels)
 
+    async def test_settings_entry_shows_unlimited_rotation_label(self) -> None:
+        services = _FakeServices(is_admin=True)
+        services.database.set_setting("rotation_limit", "0")
+        update = _FakeUpdate("/settings", user_id=11)
+        context = _FakeContext(services)
+
+        result = await settings_entry(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
+        labels = [button.text for row in update.effective_message.reply_markups[0].inline_keyboard for button in row]
+        self.assertIn("Bilder in Rotation: Unbegrenzt", labels)
+
     async def test_interval_change_resets_timer_from_now(self) -> None:
         services = _FakeServices(is_admin=True)
         update = _FakeUpdate("2h", user_id=11)
         context = _FakeContext(services, with_job_queue=True)
-        context.user_data[PENDING_SETTINGS_KEY] = 6
+        context.user_data[PENDING_SETTINGS_KEY] = 3
 
         result = await receive_settings_value(update, context)
 
@@ -169,60 +197,130 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         services.database.set_setting("scheduled_change_time", "09:00")
         update = _FakeUpdate("2h", user_id=11)
         context = _FakeContext(services, with_job_queue=True)
-        context.user_data[PENDING_SETTINGS_KEY] = 6
+        context.user_data[PENDING_SETTINGS_KEY] = 3
 
         result = await receive_settings_value(update, context)
 
         self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         self.assertIn("überschreibt diese Anzeigedauer", update.effective_message.replies[0])
 
-    async def test_receive_settings_value_applies_and_confirms_value(self) -> None:
+    async def test_image_tuning_field_edit_updates_draft_only(self) -> None:
+        services = _FakeServices(is_admin=True)
+        update = _FakeUpdate("1.8", user_id=11)
+        context = _FakeContext(services)
+        context.user_data[PENDING_IMAGE_TUNING_FIELD_KEY] = "saturation"
+        context.user_data["image_tuning_draft"] = {
+            "saturation": 1.4,
+            "contrast": 1.4,
+            "sharpness": 1.2,
+            "brightness": 1.1,
+        }
+        context.user_data["image_tuning_base"] = dict(context.user_data["image_tuning_draft"])
+
+        result = await receive_settings_value(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
+        self.assertIsNone(services.display.last_updates)
+        self.assertEqual(context.user_data["image_tuning_draft"]["saturation"], 1.8)
+        self.assertNotIn(PENDING_IMAGE_TUNING_FIELD_KEY, context.user_data)
+        reply = update.effective_message.replies[0]
+        self.assertIn("Sättigung ist jetzt 1.8", reply)
+        self.assertIn("Bildoptimierung", reply)
+
+    async def test_image_tuning_field_rejects_invalid_float(self) -> None:
+        services = _FakeServices(is_admin=True)
+        update = _FakeUpdate("abc", user_id=11)
+        context = _FakeContext(services)
+        context.user_data[PENDING_IMAGE_TUNING_FIELD_KEY] = "saturation"
+        context.user_data["image_tuning_draft"] = {
+            "saturation": 1.4,
+            "contrast": 1.4,
+            "sharpness": 1.2,
+            "brightness": 1.1,
+        }
+        context.user_data["image_tuning_base"] = dict(context.user_data["image_tuning_draft"])
+
+        result = await receive_settings_value(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_VALUE)
+        self.assertEqual(context.user_data[PENDING_IMAGE_TUNING_FIELD_KEY], "saturation")
+        self.assertEqual(len(update.effective_message.replies), 1)
+        self.assertIn("Ungültiger Wert", update.effective_message.replies[0])
+        self.assertIsNone(services.display.last_updates)
+
+    async def test_image_tuning_save_applies_multiple_values_in_one_call(self) -> None:
         services = _FakeServices(is_admin=True)
         services.display.apply_result = DeviceSettingsApplyResult(
             success=True,
             message="Einstellungen wurden gespeichert, InkyPi wurde neu geladen und die Anzeige aktualisiert.",
-            confirmed_settings={"image_settings": {"saturation": 1.8}},
+            confirmed_settings={
+                "image_settings": {
+                    "saturation": 1.8,
+                    "contrast": 1.6,
+                    "sharpness": 1.2,
+                    "brightness": 1.1,
+                }
+            },
             device_config_path=services.display.device_config_path,
             saved=True,
             reloaded=True,
             refreshed=True,
         )
-        update = _FakeUpdate("1.8", user_id=11)
+        update = _FakeCallbackUpdate("settings|tuning_save", user_id=11)
         context = _FakeContext(services)
-        context.user_data[PENDING_SETTINGS_KEY] = 0
+        context.user_data["image_tuning_draft"] = {
+            "saturation": 1.8,
+            "contrast": 1.6,
+            "sharpness": 1.2,
+            "brightness": 1.1,
+        }
+        context.user_data["image_tuning_base"] = {
+            "saturation": 1.4,
+            "contrast": 1.4,
+            "sharpness": 1.2,
+            "brightness": 1.1,
+        }
 
-        result = await receive_settings_value(update, context)
+        result = await settings_callback(update, context)
 
         self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         self.assertEqual(
             services.display.last_updates,
-            {"image_settings": {"saturation": 1.8}},
+            {"image_settings": {"saturation": 1.8, "contrast": 1.6}},
         )
         self.assertEqual(services.display.last_refresh_current, True)
-        self.assertEqual(len(update.effective_message.replies), 1)
-        reply = update.effective_message.replies[0]
-        self.assertIn("Sättigung ist jetzt 1.8", reply)
-        self.assertIn("Anzeige aktualisiert", reply)
+        self.assertNotIn("image_tuning_draft", context.user_data)
+        self.assertIn("Bildoptimierung wurde gespeichert", update.callback_query.text_edits[0])
+        self.assertIn("Einstellungen", update.callback_query.text_edits[0])
 
-    async def test_receive_settings_value_rejects_invalid_float(self) -> None:
+    async def test_image_tuning_back_discards_draft(self) -> None:
         services = _FakeServices(is_admin=True)
-        update = _FakeUpdate("abc", user_id=11)
+        update = _FakeCallbackUpdate("settings|tuning_back", user_id=11)
         context = _FakeContext(services)
-        context.user_data[PENDING_SETTINGS_KEY] = 0
+        context.user_data["image_tuning_draft"] = {
+            "saturation": 1.8,
+            "contrast": 1.4,
+            "sharpness": 1.2,
+            "brightness": 1.1,
+        }
+        context.user_data["image_tuning_base"] = {
+            "saturation": 1.4,
+            "contrast": 1.4,
+            "sharpness": 1.2,
+            "brightness": 1.1,
+        }
 
-        result = await receive_settings_value(update, context)
+        result = await settings_callback(update, context)
 
-        self.assertEqual(result, WAITING_FOR_SETTINGS_VALUE)
-        self.assertEqual(context.user_data[PENDING_SETTINGS_KEY], 0)
-        self.assertEqual(len(update.effective_message.replies), 1)
-        self.assertIn("Ungültiger Wert", update.effective_message.replies[0])
-        self.assertIsNone(services.display.last_updates)
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
+        self.assertNotIn("image_tuning_draft", context.user_data)
+        self.assertEqual(update.callback_query.text_edits[0], "Einstellungen")
 
     async def test_rotation_limit_setting_can_be_saved(self) -> None:
         services = _FakeServices(is_admin=True)
         update = _FakeUpdate("250", user_id=11)
         context = _FakeContext(services)
-        context.user_data[PENDING_SETTINGS_KEY] = 10
+        context.user_data[PENDING_SETTINGS_KEY] = 7
 
         result = await receive_settings_value(update, context)
 
@@ -230,16 +328,27 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(services.database.get_setting("rotation_limit"), "250")
         self.assertIn("Bilder in Rotation ist jetzt 250", update.effective_message.replies[0])
 
+    async def test_rotation_limit_can_be_set_to_unlimited(self) -> None:
+        services = _FakeServices(is_admin=True)
+        update = _FakeCallbackUpdate("settings|apply|7|unlimited", user_id=11)
+        context = _FakeContext(services)
+
+        result = await settings_callback(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
+        self.assertEqual(services.database.get_setting("rotation_limit"), "0")
+        self.assertIn("Unbegrenzt", update.callback_query.text_edits[0])
+
     async def test_rotation_limit_setting_rejects_invalid_values(self) -> None:
         services = _FakeServices(is_admin=True)
-        update = _FakeUpdate("0", user_id=11)
+        update = _FakeUpdate("1001", user_id=11)
         context = _FakeContext(services)
-        context.user_data[PENDING_SETTINGS_KEY] = 10
+        context.user_data[PENDING_SETTINGS_KEY] = 7
 
         result = await receive_settings_value(update, context)
 
         self.assertEqual(result, WAITING_FOR_SETTINGS_VALUE)
-        self.assertEqual(context.user_data[PENDING_SETTINGS_KEY], 10)
+        self.assertEqual(context.user_data[PENDING_SETTINGS_KEY], 7)
         self.assertIn("zwischen 1 und 1000", update.effective_message.replies[0])
 
     async def test_receive_settings_value_applies_orientation_and_inverted_image(self) -> None:
@@ -259,7 +368,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         )
         update = _FakeUpdate("vertical", user_id=11)
         context = _FakeContext(services)
-        context.user_data[PENDING_SETTINGS_KEY] = 4
+        context.user_data[PENDING_SETTINGS_KEY] = 1
 
         with patch("app.settings_conversation._switch_orientation_library", return_value=(False, "Es gibt noch keine Bilder für Hochformat.")):
             result = await receive_settings_value(update, context)
@@ -286,7 +395,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         )
         update = _FakeUpdate("querformat", user_id=11)
         context = _FakeContext(services)
-        context.user_data[PENDING_SETTINGS_KEY] = 4
+        context.user_data[PENDING_SETTINGS_KEY] = 1
 
         with patch("app.settings_conversation._switch_orientation_library", return_value=(True, "Zeige jetzt Querformat-Bild img-2.")):
             result = await receive_settings_value(update, context)
@@ -309,7 +418,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
             reloaded=True,
             refreshed=False,
         )
-        update = _FakeCallbackUpdate("settings|apply|4|horizontal", user_id=11)
+        update = _FakeCallbackUpdate("settings|apply|1|horizontal", user_id=11)
         context = _FakeContext(services)
 
         with patch("app.settings_conversation._switch_orientation_library", return_value=(True, "Zeige jetzt Querformat-Bild img-2.")):
@@ -350,7 +459,7 @@ class OrientationSwitchTests(unittest.IsolatedAsyncioTestCase):
             )
             update = _FakeUpdate("querformat", user_id=11)
             context = _RealishContext(services)
-            context.user_data[PENDING_SETTINGS_KEY] = 4
+            context.user_data[PENDING_SETTINGS_KEY] = 1
 
             result = await receive_settings_value(update, context)
 
@@ -366,7 +475,7 @@ class OrientationSwitchTests(unittest.IsolatedAsyncioTestCase):
             services = _RealishServices(tmpdir_path)
             update = _FakeUpdate("querformat", user_id=11)
             context = _RealishContext(services)
-            context.user_data[PENDING_SETTINGS_KEY] = 4
+            context.user_data[PENDING_SETTINGS_KEY] = 1
 
             result = await receive_settings_value(update, context)
 
@@ -434,6 +543,26 @@ class _FakeDisplay:
     ) -> DeviceSettingsApplyResult:
         self.last_updates = updates
         self.last_refresh_current = refresh_current
+        merged_settings = {
+            **self.settings,
+            "image_settings": dict(self.settings.get("image_settings", {})),
+        }
+        if "image_settings" in updates and isinstance(updates["image_settings"], dict):
+            merged_settings["image_settings"].update(updates["image_settings"])
+        for key, value in updates.items():
+            if key != "image_settings":
+                merged_settings[key] = value
+        self.settings = merged_settings
+        self.apply_result = DeviceSettingsApplyResult(
+            success=self.apply_result.success,
+            message=self.apply_result.message,
+            confirmed_settings=merged_settings,
+            device_config_path=self.apply_result.device_config_path,
+            saved=self.apply_result.saved,
+            reloaded=self.apply_result.reloaded,
+            refreshed=self.apply_result.refreshed,
+            refresh_skipped=self.apply_result.refresh_skipped,
+        )
         return self.apply_result
 
     def set_slideshow_interval(self, seconds: int) -> DeviceSettingsApplyResult:

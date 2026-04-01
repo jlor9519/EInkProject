@@ -16,6 +16,9 @@ from app.orientation import format_orientation_label, normalize_orientation_valu
 
 WAITING_FOR_SETTINGS_CHOICE, WAITING_FOR_SETTINGS_VALUE = range(10, 12)
 PENDING_SETTINGS_KEY = "pending_settings_choice"
+PENDING_IMAGE_TUNING_FIELD_KEY = "pending_image_tuning_field"
+IMAGE_TUNING_DRAFT_KEY = "image_tuning_draft"
+IMAGE_TUNING_BASE_KEY = "image_tuning_base"
 SETTINGS_CALLBACK_PREFIX = "settings|"
 
 
@@ -24,14 +27,11 @@ class _SettingDef:
     label: str
     key: str               # top-level key in device.json, or db setting key
     subkey: str | None     # key inside image_settings, or None
-    kind: str              # "float" | "orientation" | "fit_mode" | "integer" | "interval" | "sleep_schedule"
+    kind: str              # "image_tuning" | "orientation" | "fit_mode" | "integer" | "interval" | "sleep_schedule"
 
 
 _SETTINGS: list[_SettingDef] = [
-    _SettingDef("Sättigung",           "image_settings",       "saturation", "float"),
-    _SettingDef("Kontrast",            "image_settings",       "contrast",   "float"),
-    _SettingDef("Schärfe",             "image_settings",       "sharpness",  "float"),
-    _SettingDef("Helligkeit",          "image_settings",       "brightness", "float"),
+    _SettingDef("Bildoptimierung",     "image_settings",       None,         "image_tuning"),
     _SettingDef("Ausrichtung",         "orientation",          None,         "orientation"),
     _SettingDef("Bildanpassung",       "image_fit_mode",       None,         "fit_mode"),
     _SettingDef("Anzeigedauer",        "slideshow_interval",   None,         "interval"),
@@ -40,6 +40,14 @@ _SETTINGS: list[_SettingDef] = [
     _SettingDef("Täglicher Bildwechsel", "scheduled_change_time", None,     "scheduled_time"),
     _SettingDef("Bilder in Rotation",  "rotation_limit",       None,         "integer"),
 ]
+
+_IMAGE_TUNING_FIELDS: list[tuple[str, str]] = [
+    ("Sättigung", "saturation"),
+    ("Kontrast", "contrast"),
+    ("Schärfe", "sharpness"),
+    ("Helligkeit", "brightness"),
+]
+_IMAGE_TUNING_LABELS = {key: label for label, key in _IMAGE_TUNING_FIELDS}
 
 _FIT_MODE_LABELS = {"fill": "Zuschneiden", "contain": "Einpassen"}
 
@@ -114,13 +122,15 @@ _FIT_MODE_MAP = {
 
 
 def _get_current_value(settings: dict[str, Any], s: _SettingDef) -> str:
+    if s.kind == "image_tuning":
+        return "4 Werte"
     if s.kind == "orientation":
         return format_orientation_label(str(settings.get("orientation", "?")))
     if s.kind == "fit_mode":
         raw = str(settings.get("image_fit_mode", "fill"))
         return _FIT_MODE_LABELS.get(raw, raw)
     if s.kind == "integer":
-        return str(settings.get(s.key, "100"))
+        return _format_rotation_limit_value(settings.get(s.key, 100))
     if s.kind == "interval":
         raw = settings.get(s.key, 86400)
         try:
@@ -151,6 +161,57 @@ def _settings_callback_data(*parts: object) -> str:
     return f"{SETTINGS_CALLBACK_PREFIX}{'|'.join(str(part) for part in parts)}"
 
 
+def _format_rotation_limit_value(raw_value: Any) -> str:
+    try:
+        parsed = int(str(raw_value))
+    except (TypeError, ValueError):
+        parsed = 100
+    return "Unbegrenzt" if parsed == 0 else str(parsed)
+
+
+def _normalize_tuning_value(raw_value: Any) -> float:
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _load_image_tuning_values(settings: dict[str, Any]) -> dict[str, float]:
+    raw_settings = settings.get("image_settings")
+    image_settings = raw_settings if isinstance(raw_settings, dict) else {}
+    return {
+        key: _normalize_tuning_value(image_settings.get(key))
+        for _, key in _IMAGE_TUNING_FIELDS
+    }
+
+
+def _clear_image_tuning_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(PENDING_IMAGE_TUNING_FIELD_KEY, None)
+    context.user_data.pop(IMAGE_TUNING_DRAFT_KEY, None)
+    context.user_data.pop(IMAGE_TUNING_BASE_KEY, None)
+
+
+def _ensure_image_tuning_state(
+    context: ContextTypes.DEFAULT_TYPE,
+    services,
+) -> tuple[dict[str, float], dict[str, float]]:
+    draft = context.user_data.get(IMAGE_TUNING_DRAFT_KEY)
+    base = context.user_data.get(IMAGE_TUNING_BASE_KEY)
+    if isinstance(draft, dict) and isinstance(base, dict):
+        return draft, base
+
+    current = _load_image_tuning_values(services.display.read_device_settings())
+    draft = dict(current)
+    base = dict(current)
+    context.user_data[IMAGE_TUNING_DRAFT_KEY] = draft
+    context.user_data[IMAGE_TUNING_BASE_KEY] = base
+    return draft, base
+
+
+def _format_tuning_value(value: float) -> str:
+    return f"{value:.1f}"
+
+
 def _load_settings_snapshot(services) -> dict[str, Any]:
     device_settings = services.display.read_device_settings()
     device_settings["image_fit_mode"] = services.database.get_setting("image_fit_mode") or "fill"
@@ -177,27 +238,22 @@ def _format_settings_menu_text(notice: str | None = None) -> str:
 def _settings_menu_keyboard(settings: dict[str, Any]) -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton(f"Sättigung: {_get_current_value(settings, _SETTINGS[0])}", callback_data=_settings_callback_data("select", 0)),
-            InlineKeyboardButton(f"Kontrast: {_get_current_value(settings, _SETTINGS[1])}", callback_data=_settings_callback_data("select", 1)),
+            InlineKeyboardButton("Bildoptimierung", callback_data=_settings_callback_data("select", 0)),
         ],
         [
-            InlineKeyboardButton(f"Schärfe: {_get_current_value(settings, _SETTINGS[2])}", callback_data=_settings_callback_data("select", 2)),
-            InlineKeyboardButton(f"Helligkeit: {_get_current_value(settings, _SETTINGS[3])}", callback_data=_settings_callback_data("select", 3)),
+            InlineKeyboardButton(f"Ausrichtung: {_get_current_value(settings, _SETTINGS[1])}", callback_data=_settings_callback_data("select", 1)),
+            InlineKeyboardButton(f"Bildanpassung: {_get_current_value(settings, _SETTINGS[2])}", callback_data=_settings_callback_data("select", 2)),
         ],
         [
-            InlineKeyboardButton(f"Ausrichtung: {_get_current_value(settings, _SETTINGS[4])}", callback_data=_settings_callback_data("select", 4)),
-            InlineKeyboardButton(f"Bildanpassung: {_get_current_value(settings, _SETTINGS[5])}", callback_data=_settings_callback_data("select", 5)),
+            InlineKeyboardButton(f"Anzeigedauer: {_get_current_value(settings, _SETTINGS[3])}", callback_data=_settings_callback_data("select", 3)),
+            InlineKeyboardButton(f"Ruhezeit: {_get_current_value(settings, _SETTINGS[4])}", callback_data=_settings_callback_data("select", 4)),
         ],
         [
-            InlineKeyboardButton(f"Anzeigedauer: {_get_current_value(settings, _SETTINGS[6])}", callback_data=_settings_callback_data("select", 6)),
-            InlineKeyboardButton(f"Ruhezeit: {_get_current_value(settings, _SETTINGS[7])}", callback_data=_settings_callback_data("select", 7)),
+            InlineKeyboardButton(f"Neue Bilder: {_get_current_value(settings, _SETTINGS[5])}", callback_data=_settings_callback_data("select", 5)),
+            InlineKeyboardButton(f"Täglicher Wechsel: {_get_current_value(settings, _SETTINGS[6])}", callback_data=_settings_callback_data("select", 6)),
         ],
         [
-            InlineKeyboardButton(f"Neue Bilder: {_get_current_value(settings, _SETTINGS[8])}", callback_data=_settings_callback_data("select", 8)),
-            InlineKeyboardButton(f"Täglicher Wechsel: {_get_current_value(settings, _SETTINGS[9])}", callback_data=_settings_callback_data("select", 9)),
-        ],
-        [
-            InlineKeyboardButton(f"Bilder in Rotation: {_get_current_value(settings, _SETTINGS[10])}", callback_data=_settings_callback_data("select", 10)),
+            InlineKeyboardButton(f"Bilder in Rotation: {_get_current_value(settings, _SETTINGS[7])}", callback_data=_settings_callback_data("select", 7)),
         ],
         [InlineKeyboardButton("Abbrechen", callback_data=_settings_callback_data("close"))],
     ]
@@ -220,6 +276,8 @@ def _settings_prompt_keyboard(idx: int, s: _SettingDef) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Einpassen", callback_data=_settings_callback_data("apply", idx, "contain")),
             ]
         )
+    elif s.kind == "integer":
+        rows.append([InlineKeyboardButton("Unbegrenzt", callback_data=_settings_callback_data("apply", idx, "unlimited"))])
     elif s.kind in {"sleep_schedule", "scheduled_time"}:
         rows.append([InlineKeyboardButton("Deaktivieren", callback_data=_settings_callback_data("disable", idx))])
 
@@ -242,7 +300,7 @@ def _prompt_text_for_setting(services, idx: int, notice: str | None = None) -> s
         current_raw = services.database.get_setting("image_fit_mode") or "fill"
         current = _FIT_MODE_LABELS.get(current_raw, current_raw)
     elif s.kind == "integer":
-        current = services.database.get_setting(s.key) or "100"
+        current = _format_rotation_limit_value(services.database.get_setting(s.key) or "100")
     elif s.kind == "interval":
         raw_seconds = services.display.get_slideshow_interval()
         current = _format_interval_label(raw_seconds)
@@ -329,6 +387,7 @@ def _prompt_text_for_setting(services, idx: int, notice: str | None = None) -> s
                 "Ältere Bilder bleiben gespeichert, werden aber nicht mehr automatisch angezeigt.",
                 "",
                 "Erlaubt sind Werte zwischen 1 und 1000.",
+                "Oder aktiviere Unbegrenzt per Button.",
             ]
         )
     else:
@@ -339,6 +398,103 @@ def _prompt_text_for_setting(services, idx: int, notice: str | None = None) -> s
             ]
         )
     return "\n".join(lines)
+
+
+def _format_image_tuning_menu_text(notice: str | None = None) -> str:
+    if notice:
+        return f"{notice}\n\nBildoptimierung"
+    return "Bildoptimierung"
+
+
+def _image_tuning_menu_keyboard(draft: dict[str, float]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"Sättigung: {_format_tuning_value(draft['saturation'])}",
+                callback_data=_settings_callback_data("tuning_field", "saturation"),
+            ),
+            InlineKeyboardButton(
+                f"Kontrast: {_format_tuning_value(draft['contrast'])}",
+                callback_data=_settings_callback_data("tuning_field", "contrast"),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                f"Schärfe: {_format_tuning_value(draft['sharpness'])}",
+                callback_data=_settings_callback_data("tuning_field", "sharpness"),
+            ),
+            InlineKeyboardButton(
+                f"Helligkeit: {_format_tuning_value(draft['brightness'])}",
+                callback_data=_settings_callback_data("tuning_field", "brightness"),
+            ),
+        ],
+        [InlineKeyboardButton("Speichern", callback_data=_settings_callback_data("tuning_save"))],
+        [
+            InlineKeyboardButton("Zurück", callback_data=_settings_callback_data("tuning_back")),
+            InlineKeyboardButton("Abbrechen", callback_data=_settings_callback_data("close")),
+        ],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _image_tuning_prompt_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Zurück", callback_data=_settings_callback_data("tuning_menu")),
+                InlineKeyboardButton("Abbrechen", callback_data=_settings_callback_data("close")),
+            ]
+        ]
+    )
+
+
+async def _show_image_tuning_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    notice: str | None = None,
+) -> int:
+    services = get_services(context)
+    context.user_data.pop(PENDING_SETTINGS_KEY, None)
+    context.user_data.pop(PENDING_IMAGE_TUNING_FIELD_KEY, None)
+    draft, _ = _ensure_image_tuning_state(context, services)
+    await _respond_settings_message(
+        update,
+        _format_image_tuning_menu_text(notice),
+        reply_markup=_image_tuning_menu_keyboard(draft),
+    )
+    return WAITING_FOR_SETTINGS_CHOICE
+
+
+async def _show_image_tuning_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    field_key: str,
+    *,
+    notice: str | None = None,
+) -> int:
+    services = get_services(context)
+    draft, _ = _ensure_image_tuning_state(context, services)
+    label = _IMAGE_TUNING_LABELS[field_key]
+    context.user_data[PENDING_IMAGE_TUNING_FIELD_KEY] = field_key
+    context.user_data.pop(PENDING_SETTINGS_KEY, None)
+
+    lines: list[str] = []
+    if notice:
+        lines.extend([notice, ""])
+    lines.extend(
+        [
+            f"Aktueller Entwurf für {label}: {_format_tuning_value(draft[field_key])}",
+            "",
+            "Gib den neuen Wert ein (z.B. 1.0, 1.4, 2.0):",
+        ]
+    )
+    await _respond_settings_message(
+        update,
+        "\n".join(lines),
+        reply_markup=_image_tuning_prompt_keyboard(),
+    )
+    return WAITING_FOR_SETTINGS_VALUE
 
 
 def _next_fire_delay_for_orientation(services, active_orientation: str) -> int | None:
@@ -431,6 +587,7 @@ async def _show_settings_menu(
 ) -> int:
     services = get_services(context)
     context.user_data.pop(PENDING_SETTINGS_KEY, None)
+    _clear_image_tuning_state(context)
     try:
         snapshot = _load_settings_snapshot(services)
     except Exception as exc:
@@ -490,10 +647,23 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return await _show_settings_menu(update, context)
     if action == "close":
         context.user_data.pop(PENDING_SETTINGS_KEY, None)
+        _clear_image_tuning_state(context)
         await _delete_settings_message(update, context)
         return ConversationHandler.END
     if action == "back":
         return await _show_settings_menu(update, context)
+    if action == "tuning_menu":
+        return await _show_image_tuning_menu(update, context)
+    if action == "tuning_field" and len(parts) > 2:
+        field_key = parts[2]
+        if field_key not in _IMAGE_TUNING_LABELS:
+            await _respond_settings_message(update, "Unbekannte Bildoptimierung.")
+            return WAITING_FOR_SETTINGS_CHOICE
+        return await _show_image_tuning_prompt(update, context, field_key)
+    if action == "tuning_back":
+        return await _show_settings_menu(update, context)
+    if action == "tuning_save":
+        return await _save_image_tuning(update, context)
     if action == "select" and len(parts) > 2:
         try:
             idx = int(parts[2])
@@ -503,6 +673,8 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if idx < 0 or idx >= len(_SETTINGS):
             await _respond_settings_message(update, "Unbekannte Einstellung.")
             return WAITING_FOR_SETTINGS_CHOICE
+        if _SETTINGS[idx].kind == "image_tuning":
+            return await _show_image_tuning_menu(update, context)
         return await _show_setting_prompt(update, context, idx)
     if action == "apply" and len(parts) > 3:
         try:
@@ -540,16 +712,90 @@ async def receive_settings_choice(update: Update, context: ContextTypes.DEFAULT_
         )
         return WAITING_FOR_SETTINGS_CHOICE
 
-    return await _show_setting_prompt(update, context, choice - 1)
+    idx = choice - 1
+    if _SETTINGS[idx].kind == "image_tuning":
+        return await _show_image_tuning_menu(update, context)
+    return await _show_setting_prompt(update, context, idx)
 
 
 async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_message is None:
         return ConversationHandler.END
+    pending_tuning_field = context.user_data.get(PENDING_IMAGE_TUNING_FIELD_KEY)
+    if isinstance(pending_tuning_field, str):
+        return await _apply_image_tuning_value(update, context, pending_tuning_field, update.effective_message.text or "")
     idx = context.user_data.pop(PENDING_SETTINGS_KEY, None)
     if idx is None:
         return WAITING_FOR_SETTINGS_CHOICE
     return await _apply_setting_value(update, context, idx, update.effective_message.text or "")
+
+
+async def _apply_image_tuning_value(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    field_key: str,
+    raw_text: str,
+) -> int:
+    text = raw_text.strip().lower()
+    try:
+        value = float(text.replace(",", "."))
+    except ValueError:
+        return await _show_image_tuning_prompt(
+            update,
+            context,
+            field_key,
+            notice="Ungültiger Wert. Bitte gib eine Zahl ein (z.B. 1.0), oder nutze /cancel.",
+        )
+    if value < 0.1 or value > 3.0:
+        return await _show_image_tuning_prompt(
+            update,
+            context,
+            field_key,
+            notice="Der Wert muss zwischen 0.1 und 3.0 liegen. Bitte erneut eingeben oder /cancel.",
+        )
+
+    services = get_services(context)
+    draft, _ = _ensure_image_tuning_state(context, services)
+    draft[field_key] = value
+    context.user_data.pop(PENDING_IMAGE_TUNING_FIELD_KEY, None)
+    return await _show_image_tuning_menu(
+        update,
+        context,
+        notice=f"{_IMAGE_TUNING_LABELS[field_key]} ist jetzt {_format_tuning_value(value)}.",
+    )
+
+
+async def _save_image_tuning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    services = get_services(context)
+    draft, base = _ensure_image_tuning_state(context, services)
+    changed_updates = {
+        key: value
+        for key, value in draft.items()
+        if _normalize_tuning_value(base.get(key)) != value
+    }
+    if not changed_updates:
+        return await _show_settings_menu(update, context, notice="Bildoptimierung unverändert.")
+
+    try:
+        result = services.display.apply_device_settings({"image_settings": changed_updates}, refresh_current=True)
+    except Exception as exc:
+        logger.exception("Failed to write grouped image settings")
+        return await _show_image_tuning_menu(
+            update,
+            context,
+            notice=f"Fehler beim Speichern der Bildoptimierung: {exc}",
+        )
+
+    confirmed_settings = result.confirmed_settings if result.confirmed_settings else {}
+    confirmed_image_settings = confirmed_settings.get("image_settings")
+    if isinstance(confirmed_image_settings, dict):
+        for key, value in confirmed_image_settings.items():
+            if key in draft:
+                draft[key] = _normalize_tuning_value(value)
+
+    path_note = f" (device.json: {result.device_config_path})" if result.device_config_path else ""
+    status_prefix = "Bildoptimierung wurde gespeichert" if result.success else "Bildoptimierung wurde teilweise gespeichert"
+    return await _show_settings_menu(update, context, notice=f"{status_prefix}{path_note}.\n{result.message}")
 
 
 async def _apply_setting_value(
@@ -561,6 +807,9 @@ async def _apply_setting_value(
     s = _SETTINGS[idx]
     text = raw_text.strip().lower()
     services = get_services(context)
+
+    if s.kind == "image_tuning":
+        return await _show_image_tuning_menu(update, context)
 
     if s.kind == "cooldown":
         if text in ("0", "aus", "off", "deaktiviert", "deaktivieren"):
@@ -636,6 +885,13 @@ async def _apply_setting_value(
         return await _show_settings_menu(update, context, notice=f"{s.label} ist jetzt {label}.")
 
     if s.kind == "integer":
+        if text in ("unlimited", "unbegrenzt", "ohne limit", "kein limit", "0"):
+            services.database.set_setting(s.key, "0")
+            return await _show_settings_menu(
+                update,
+                context,
+                notice=f"{s.label} ist jetzt Unbegrenzt. Alle gespeicherten Bilder bleiben in der Rotation.",
+            )
         try:
             int_value = int(text.replace(",", ""))
         except ValueError:
@@ -774,44 +1030,11 @@ async def _apply_setting_value(
             ),
         )
 
-    try:
-        value = float(text.replace(",", "."))
-    except ValueError:
-        return await _show_setting_prompt(
-            update,
-            context,
-            idx,
-            notice="Ungültiger Wert. Bitte gib eine Zahl ein (z.B. 1.0), oder nutze /cancel.",
-        )
-    if value < 0.1 or value > 3.0:
-        return await _show_setting_prompt(
-            update,
-            context,
-            idx,
-            notice="Der Wert muss zwischen 0.1 und 3.0 liegen. Bitte erneut eingeben oder /cancel.",
-        )
-
-    updates = {"image_settings": {str(s.subkey): value}}
-    requested_value = value
-    try:
-        result = services.display.apply_device_settings(updates, refresh_current=True)
-    except Exception as exc:
-        logger.exception("Failed to write device settings")
-        await _respond_settings_message(update, f"Fehler beim Speichern der Einstellungen: {exc}")
-        return WAITING_FOR_SETTINGS_VALUE
-
-    confirmed_value = _get_current_value(result.confirmed_settings, s) if result.confirmed_settings else str(requested_value)
-    path_note = f" (device.json: {result.device_config_path})" if result.device_config_path else ""
-    status_prefix = (
-        f"{s.label} ist jetzt {confirmed_value}"
-        if result.success
-        else f"{s.label} wurde als {confirmed_value} gespeichert"
-    )
-    return await _show_settings_menu(update, context, notice=f"{status_prefix}{path_note}.\n{result.message}")
+    return await _show_settings_menu(update, context, notice="Unbekannte Einstellung.")
 
 
 async def _settings_unexpected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    state = context.user_data.get(PENDING_SETTINGS_KEY)
+    state = context.user_data.get(PENDING_SETTINGS_KEY) or context.user_data.get(PENDING_IMAGE_TUNING_FIELD_KEY)
     if update.effective_message is not None:
         if state is None:
             await update.effective_message.reply_text("Bitte nutze die Buttons im Einstellungs-Menü oder /cancel.")
@@ -822,6 +1045,7 @@ async def _settings_unexpected(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def _settings_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop(PENDING_SETTINGS_KEY, None)
+    _clear_image_tuning_state(context)
     if update and update.effective_message:
         await update.effective_message.reply_text(
             "Einstellungs-Sitzung nach 2 Minuten Inaktivität beendet. Nutze /settings um neu zu starten."
@@ -831,6 +1055,7 @@ async def _settings_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def settings_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop(PENDING_SETTINGS_KEY, None)
+    _clear_image_tuning_state(context)
     if update.effective_message is not None:
         await update.effective_message.reply_text("Einstellungs-Menü geschlossen.")
     return ConversationHandler.END

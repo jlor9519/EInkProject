@@ -730,6 +730,35 @@ class DatabaseTests(unittest.TestCase):
                 ["shared-old", "vertical-mid", "vertical-newest"],
             )
 
+    def test_rotation_limit_zero_means_unlimited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+            database.set_setting("rotation_limit", "0")
+            for index, image_id in enumerate(("img-1", "img-2", "img-3")):
+                database.upsert_image(
+                    ImageRecord(
+                        image_id=image_id,
+                        telegram_file_id=f"file-{image_id}",
+                        telegram_chat_id=1,
+                        local_original_path=f"/tmp/{image_id}.jpg",
+                        local_rendered_path=None,
+                        location="",
+                        taken_at="",
+                        caption="",
+                        uploaded_by=1,
+                        created_at=f"2026-03-18T12:{index:02d}:00+00:00",
+                        status="displayed",
+                        last_error=None,
+                        orientation_bucket="horizontal",
+                    )
+                )
+
+            self.assertIsNone(database.get_rotation_limit())
+            self.assertEqual(database.count_rotation_pool_images("horizontal"), 3)
+            self.assertEqual(database.count_hidden_rotation_images("horizontal"), 0)
+            self.assertTrue(database.is_image_in_rotation_pool("img-1", "horizontal"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -320,6 +320,47 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('"img-mid"', update_list.effective_message.replies[0])
             self.assertIn('"img-new"', update_list.effective_message.replies[0])
 
+    async def test_status_and_list_show_no_hidden_images_when_rotation_is_unlimited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.database.set_setting("rotation_limit", "0")
+            services.database.set_setting("slideshow_next_fire_at", "2099-01-01T00:00:00+00:00")
+            for index, image_id in enumerate(("img-1", "img-2", "img-3")):
+                services.database.upsert_image(
+                    ImageRecord(
+                        image_id=image_id,
+                        telegram_file_id=f"file-{image_id}",
+                        telegram_chat_id=111,
+                        local_original_path=str(tmpdir_path / "incoming" / f"{image_id}.jpg"),
+                        local_rendered_path=None,
+                        location="",
+                        taken_at="",
+                        caption=image_id,
+                        uploaded_by=1,
+                        created_at=f"2026-03-18T12:{index:02d}:00+00:00",
+                        status="displayed",
+                        last_error=None,
+                        orientation_bucket="horizontal",
+                    )
+                )
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-1"}),
+                encoding="utf-8",
+            )
+
+            update_status = _MessageUpdate()
+            update_list = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await status_command(update_status, context)
+            await list_command(update_list, context)
+
+            self.assertIn("In Rotation: 3 Bilder", update_status.effective_message.replies[0])
+            self.assertIn("Außerhalb der Rotation gespeichert: 0", update_status.effective_message.replies[0])
+            self.assertIn("Außerhalb der Rotation gespeichert: 0", update_list.effective_message.replies[0])
+
     async def test_list_self_heals_stale_interval_timer_and_shows_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)

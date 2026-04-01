@@ -463,7 +463,7 @@ class Database:
     _DISPLAYED_STATUSES = ("displayed", "displayed_with_warnings")
     _ROTATION_ELIGIBLE_STATUSES = ("queued", "processing", "rendered", "displayed", "displayed_with_warnings")
 
-    def get_rotation_limit(self) -> int:
+    def get_rotation_limit(self) -> int | None:
         with self._lock:
             return self._get_rotation_limit_locked()
 
@@ -890,16 +890,19 @@ class Database:
             return ""
         return " AND orientation_bucket IN (?, ?)"
 
-    def _get_rotation_limit_locked(self) -> int:
+    def _get_rotation_limit_locked(self) -> int | None:
         row = self._connection.execute(
             "SELECT value FROM settings WHERE key = ?",
             ("rotation_limit",),
         ).fetchone()
         raw_value = row["value"] if row else str(DEFAULT_ROTATION_LIMIT)
         try:
-            return max(1, int(str(raw_value)))
+            parsed = int(str(raw_value))
         except (TypeError, ValueError):
             return DEFAULT_ROTATION_LIMIT
+        if parsed <= 0:
+            return None
+        return parsed
 
     def _count_rotation_eligible_images_locked(self, active_orientation: str | None) -> int:
         orientation_args = self._orientation_args(active_orientation)
@@ -918,17 +921,30 @@ class Database:
     def _get_rotation_pool_rows_locked(self, active_orientation: str | None) -> list[sqlite3.Row]:
         orientation_args = self._orientation_args(active_orientation)
         placeholders = ", ".join("?" for _ in self._ROTATION_ELIGIBLE_STATUSES)
-        rows = self._connection.execute(
-            f"""
-            SELECT *
-            FROM images
-            WHERE status IN ({placeholders})
-            {self._orientation_filter_sql(active_orientation)}
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (*self._ROTATION_ELIGIBLE_STATUSES, *orientation_args, self._get_rotation_limit_locked()),
-        ).fetchall()
+        limit = self._get_rotation_limit_locked()
+        if limit is None:
+            rows = self._connection.execute(
+                f"""
+                SELECT *
+                FROM images
+                WHERE status IN ({placeholders})
+                {self._orientation_filter_sql(active_orientation)}
+                ORDER BY created_at DESC
+                """,
+                (*self._ROTATION_ELIGIBLE_STATUSES, *orientation_args),
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                f"""
+                SELECT *
+                FROM images
+                WHERE status IN ({placeholders})
+                {self._orientation_filter_sql(active_orientation)}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (*self._ROTATION_ELIGIBLE_STATUSES, *orientation_args, limit),
+            ).fetchall()
         return list(reversed(rows))
 
     def _select_relative_row_locked(
