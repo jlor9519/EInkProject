@@ -566,6 +566,54 @@ async def _display_target(services: AppServices, target: ImageRecord) -> Display
         return DisplayResult(False, str(exc))
 
 
+async def _advance_once_to_next_target(
+    services: AppServices,
+    *,
+    current_image_id: str | None,
+    active_orientation: str,
+    transition_kind: str,
+    allow_rendered_without_current: bool = True,
+) -> tuple[ImageRecord | None, DisplayResult | None, bool]:
+    rendered = services.database.get_oldest_rendered_image_for_orientation(active_orientation)
+    if rendered is not None:
+        target = rendered
+    elif current_image_id is not None:
+        target = services.database.get_adjacent_image(current_image_id, "next", active_orientation)
+    elif allow_rendered_without_current:
+        target = None
+    else:
+        target = None
+
+    if target is None:
+        return None, None, False
+
+    mark_new_image = target.status == "rendered"
+    begin_display_transition(services.database, target.image_id, transition_kind)
+    result = await _display_target(services, target)
+
+    if result.success:
+        if mark_new_image:
+            target.status = "displayed"
+            target.last_error = None
+        commit_display_success(
+            services.database,
+            target,
+            mark_new_image=mark_new_image,
+        )
+    else:
+        if mark_new_image:
+            target.status = "display_failed"
+            target.last_error = result.message
+            services.database.apply_image_and_settings(
+                target,
+                clear_keys=DISPLAY_TRANSITION_KEYS,
+            )
+        else:
+            clear_display_transition(services.database)
+
+    return target, result, mark_new_image
+
+
 async def _navigate(update: Update, context: ContextTypes.DEFAULT_TYPE, direction: str) -> None:
     message = update.effective_message
     if message is None:
@@ -587,14 +635,23 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
     active_orientation = get_active_orientation(services)
 
     if direction == "next":
-        target, result = await _try_promote_next_rendered(update, context, services, active_orientation)
-        if target is not None:
+        target, result, _ = await _advance_once_to_next_target(
+            services,
+            current_image_id=None,
+            active_orientation=active_orientation,
+            transition_kind="manual_next",
+            allow_rendered_without_current=True,
+        )
+        if target is not None and result is not None:
             total = services.database.count_displayed_images(active_orientation)
             position = services.database.get_displayed_image_position(target.image_id, active_orientation)
             if result.success:
                 await message.reply_text(f"Bild {position} von {total}: {target.image_id}")
             else:
                 await message.reply_text(_friendly_display_error(result.message))
+            if result.success:
+                from app.slideshow import reschedule_slideshow_job
+                reschedule_slideshow_job(context.application)
             return
 
     payload_path = services.config.storage.current_payload_path
@@ -614,7 +671,25 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
         return
 
     if direction == "next":
-        target = services.database.get_next_navigation_target(current_image_id, active_orientation)
+        target, result, _ = await _advance_once_to_next_target(
+            services,
+            current_image_id=current_image_id,
+            active_orientation=active_orientation,
+            transition_kind="manual_next",
+            allow_rendered_without_current=True,
+        )
+        if target is None or result is None:
+            await message.reply_text("Kein weiteres Bild vorhanden.")
+            return
+        total = services.database.count_displayed_images(active_orientation)
+        position = services.database.get_displayed_image_position(target.image_id, active_orientation)
+        if result.success:
+            await message.reply_text(f"Bild {position} von {total}: {target.image_id}")
+            from app.slideshow import reschedule_slideshow_job
+            reschedule_slideshow_job(context.application)
+        else:
+            await message.reply_text(_friendly_display_error(result.message))
+        return
     else:
         target = services.database.get_adjacent_image(current_image_id, direction, active_orientation)
     if target is None:
@@ -641,35 +716,6 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
     else:
         clear_display_transition(services.database)
         await message.reply_text(_friendly_display_error(result.message))
-
-
-async def _try_promote_next_rendered(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    services: AppServices,
-    active_orientation: str,
-) -> tuple[ImageRecord | None, DisplayResult]:
-    rendered = services.database.get_oldest_rendered_image_for_orientation(active_orientation)
-    if rendered is None:
-        return None, DisplayResult(False, "")
-
-    begin_display_transition(services.database, rendered.image_id, "manual_next")
-    result = await _display_target(services, rendered)
-    if result.success:
-        rendered.status = "displayed"
-        rendered.last_error = None
-        commit_display_success(
-            services.database,
-            rendered,
-            mark_new_image=True,
-        )
-        from app.slideshow import reschedule_slideshow_job
-        reschedule_slideshow_job(context.application)
-    else:
-        rendered.status = "display_failed"
-        rendered.last_error = result.message
-        services.database.apply_image_and_settings(rendered, clear_keys=DISPLAY_TRANSITION_KEYS)
-    return rendered, result
 
 
 @require_whitelist

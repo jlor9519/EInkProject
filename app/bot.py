@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from app.slideshow import schedule_slideshow_job
 from app.commands import (
+    _advance_once_to_next_target,
     _delete_back_callback,
     _delete_cancel_callback,
     _delete_confirm_callback,
@@ -35,6 +37,66 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_QUEUE_KEY = "upload_queue"
 UPLOAD_WORKER_TASK_KEY = "upload_worker_task"
+LAST_HANDLED_BOOT_ID_KEY = "last_handled_boot_id"
+BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+
+
+def _read_current_boot_id(path: Path = BOOT_ID_PATH) -> str | None:
+    try:
+        boot_id = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        logger.warning("Could not read Linux boot id from %s; skipping boot-time image advance", path)
+        return None
+    return boot_id or None
+
+
+async def _maybe_advance_after_boot(application: Application, current_image_id: str | None) -> None:
+    services = application.bot_data["services"]
+    current_boot_id = _read_current_boot_id()
+    if current_boot_id is None:
+        return
+
+    last_handled_boot_id = services.database.get_setting(LAST_HANDLED_BOOT_ID_KEY)
+    if current_boot_id == last_handled_boot_id:
+        logger.debug("Boot-time image advance already handled for boot id %s", current_boot_id)
+        return
+
+    try:
+        wait_until_ready = getattr(services.display, "wait_until_ready", None)
+        if callable(wait_until_ready):
+            readiness_error = await asyncio.to_thread(wait_until_ready)
+            if readiness_error is not None:
+                logger.warning("Skipping boot-time image advance because display backend is not ready: %s", readiness_error)
+                return
+
+        if not current_image_id:
+            logger.info("Skipping boot-time image advance because no current payload image exists")
+            return
+
+        active_orientation = services.display.current_orientation()
+        lock: asyncio.Lock = application.bot_data["display_lock"]
+        async with lock:
+            target, result, _ = await _advance_once_to_next_target(
+                services,
+                current_image_id=current_image_id,
+                active_orientation=active_orientation,
+                transition_kind="boot_advance",
+                allow_rendered_without_current=False,
+            )
+
+        if target is None:
+            logger.info("Boot-time image advance skipped because no eligible next image was found")
+            return
+        if result is None:
+            logger.info("Boot-time image advance skipped before display attempt")
+            return
+        if result.success:
+            logger.info("Boot-time image advance displayed %s", target.image_id)
+            return
+
+        logger.warning("Boot-time image advance failed for %s: %s", target.image_id, result.message)
+    finally:
+        services.database.set_setting(LAST_HANDLED_BOOT_ID_KEY, current_boot_id)
 
 
 async def _post_init(application: Application) -> None:
@@ -44,6 +106,7 @@ async def _post_init(application: Application) -> None:
         current_image_id,
         transition_keys=DISPLAY_TRANSITION_KEYS,
     )
+    await _maybe_advance_after_boot(application, current_image_id)
     schedule_slideshow_job(application)
     application.bot_data[UPLOAD_WORKER_TASK_KEY] = asyncio.create_task(
         _upload_worker(application),

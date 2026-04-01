@@ -360,6 +360,78 @@ class InkyPiAdapterTests(unittest.TestCase):
             self.assertTrue(result.refresh_skipped)
             self.assertIn("kein aktuelles Bild", result.message)
 
+    def test_wait_until_ready_checks_service_and_http(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            adapter = InkyPiAdapter(
+                self._build_config(
+                    tmpdir_path,
+                    update_method="http_update_now",
+                    update_now_url="http://127.0.0.1/update_now",
+                    refresh_command="sudo systemctl restart inkypi.service",
+                ),
+                self._build_storage(tmpdir_path),
+                self._build_display_config(),
+            )
+
+            with patch.object(adapter, "_wait_for_inkypi_service_active", return_value=None) as mock_service, patch.object(
+                adapter,
+                "_wait_for_inkypi_http_ready",
+                return_value=None,
+            ) as mock_http:
+                self.assertIsNone(adapter.wait_until_ready())
+
+            mock_service.assert_called_once()
+            mock_http.assert_called_once()
+
+    def test_wait_until_ready_in_command_mode_skips_service_and_http_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            adapter = InkyPiAdapter(
+                self._build_config(
+                    tmpdir_path,
+                    update_method="command",
+                    update_now_url="http://127.0.0.1/update_now",
+                    refresh_command="echo refresh",
+                ),
+                self._build_storage(tmpdir_path),
+                self._build_display_config(),
+            )
+
+            with patch.object(adapter, "_wait_for_inkypi_service_active") as mock_service, patch.object(
+                adapter,
+                "_wait_for_inkypi_http_ready",
+            ) as mock_http:
+                self.assertIsNone(adapter.wait_until_ready())
+
+            mock_service.assert_not_called()
+            mock_http.assert_not_called()
+
+    def test_wait_until_ready_short_circuits_when_service_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            adapter = InkyPiAdapter(
+                self._build_config(
+                    tmpdir_path,
+                    update_method="http_update_now",
+                    update_now_url="http://127.0.0.1/update_now",
+                    refresh_command="sudo systemctl restart inkypi.service",
+                ),
+                self._build_storage(tmpdir_path),
+                self._build_display_config(),
+            )
+
+            with patch.object(
+                adapter,
+                "_wait_for_inkypi_service_active",
+                return_value="inkypi.service ist nicht aktiv geworden.",
+            ) as mock_service, patch.object(adapter, "_wait_for_inkypi_http_ready") as mock_http:
+                result = adapter.wait_until_ready()
+
+            self.assertEqual(result, "inkypi.service ist nicht aktiv geworden.")
+            mock_service.assert_called_once()
+            mock_http.assert_not_called()
+
     def test_apply_device_settings_can_update_orientation_and_inverted_image(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)

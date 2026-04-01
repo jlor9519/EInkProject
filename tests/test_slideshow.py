@@ -156,7 +156,10 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
             berlin = ZoneInfo("Europe/Berlin")
             now = datetime(2026, 4, 1, 21, 30, tzinfo=berlin)
 
-            with patch("app.slideshow.local_now", return_value=now):
+            with patch("app.slideshow.local_now", return_value=now), patch(
+                "app.time_utils.local_now",
+                return_value=now,
+            ):
                 decision = compute_next_fire_decision(services)
 
             self.assertEqual(decision.mode, "interval")
@@ -170,7 +173,10 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
             berlin = ZoneInfo("Europe/Berlin")
             now = datetime(2026, 4, 1, 21, 0, tzinfo=berlin)
 
-            with patch("app.slideshow.local_now", return_value=now):
+            with patch("app.slideshow.local_now", return_value=now), patch(
+                "app.time_utils.local_now",
+                return_value=now,
+            ):
                 decision = compute_next_fire_decision(services)
 
             self.assertEqual(decision.mode, "scheduled_daily")

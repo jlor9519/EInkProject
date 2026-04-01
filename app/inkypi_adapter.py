@@ -252,6 +252,14 @@ class InkyPiAdapter:
     def refresh_only(self) -> DisplayResult:
         return self._trigger_display_update(self.storage.current_payload_path)
 
+    def wait_until_ready(self) -> str | None:
+        if self.config.update_method == "command":
+            return None
+        service_error = self._wait_for_inkypi_service_active()
+        if service_error is not None:
+            return service_error
+        return self._wait_for_inkypi_http_ready()
+
     def _trigger_display_update(self, payload_path: Path) -> DisplayResult:
         try:
             payload = self._load_payload(payload_path)
@@ -773,7 +781,12 @@ class InkyPiAdapter:
                 )
             return stderr
 
-        deadline = time.monotonic() + INKYPI_RESTART_TIMEOUT_SECONDS
+        return self._wait_for_inkypi_service_active()
+
+    def _wait_for_inkypi_service_active(self) -> str | None:
+        sudo_bin = shutil.which("sudo")
+        if sudo_bin is None:
+            return "sudo ist nicht verfügbar."
         status_command = [
             sudo_bin,
             "-n",
@@ -781,6 +794,7 @@ class InkyPiAdapter:
             "is-active",
             INKYPI_SERVICE_NAME,
         ]
+        deadline = time.monotonic() + INKYPI_RESTART_TIMEOUT_SECONDS
         last_status = "inkypi.service ist nicht aktiv geworden."
         while time.monotonic() < deadline:
             try:
