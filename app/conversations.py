@@ -428,10 +428,6 @@ async def _submit_photo(
         context.user_data.pop(PENDING_SUBMISSION_KEY, None)
         return ConversationHandler.END
 
-    await _safe_reply_text(
-        message,
-        f"Dein Foto wurde in die Warteschlange aufgenommen.\nBild-ID: {record.image_id}",
-    )
     context.user_data.pop(PENDING_SUBMISSION_KEY, None)
     return ConversationHandler.END
 
@@ -564,9 +560,8 @@ async def process_queued_upload(application: Application, image_id: str) -> None
                 record = await _notify_completion(
                     application,
                     record,
-                    f"Dein Foto wurde gerendert und wartet darauf, dass der Rahmen wieder im "
-                    f"{format_orientation_label(record.orientation_bucket)} ist.\n"
-                    f"Bild-ID: {record.image_id}",
+                    f"Das Bild wartet in der Warteschlange, bis der Rahmen wieder im "
+                    f"{format_orientation_label(record.orientation_bucket)} ist.",
                 )
                 services.database.upsert_image(record)
                 return
@@ -582,9 +577,8 @@ async def process_queued_upload(application: Application, image_id: str) -> None
                 eta_label = _format_interval_label(eta_seconds)
                 record = await _notify_completion(
                     application, record,
-                    f"Dein Foto wurde gerendert und ist in der Warteschlange (Position {pending_count}).\n"
-                    f"Geschätzte Anzeige: in ca. {eta_label}.\n"
-                    f"Bild-ID: {record.image_id}",
+                    f"Das Bild befindet sich in der Warteschlange (Position {pending_count}) "
+                    f"und wird voraussichtlich in ca. {eta_label} angezeigt.",
                 )
                 services.database.upsert_image(record)
 
@@ -679,10 +673,7 @@ async def _display_rendered_image(
 def _build_success_reply(record: ImageRecord, warnings: list[str]) -> str:
     if record.status == "display_failed":
         return f"Foto gerendert, aber die Anzeige konnte nicht aktualisiert werden: {record.last_error}"
-    lines = [
-        "Das Foto wurde erfolgreich an den Rahmen gesendet.",
-        f"Bild-ID: {record.image_id}",
-    ]
+    lines = ["Das Bild wird jetzt angezeigt."]
     if warnings:
         lines.append("Warnungen:")
         lines.extend(f"- {w}" for w in warnings)

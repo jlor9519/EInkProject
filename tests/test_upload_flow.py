@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -67,6 +68,9 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             await _submit_photo(update_one, context_one, show_caption=False)
             await _submit_photo(update_two, context_two, show_caption=False)
 
+            self.assertEqual(len(update_one.effective_message.replies), 1)
+            self.assertEqual(len(update_two.effective_message.replies), 1)
+
             queue: asyncio.Queue[str] = application.bot_data["upload_queue"]
             self.assertEqual(await queue.get(), image_id_one)
             self.assertEqual(await queue.get(), image_id_two)
@@ -77,6 +81,125 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(queued_two.status, "queued")
             self.assertEqual(queued_one.telegram_chat_id, 101)
             self.assertEqual(queued_two.telegram_chat_id, 202)
+
+    async def test_submit_and_process_photo_sends_single_immediate_success_message_without_image_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            application = _FakeApplication(services)
+            update = _FakeUpdate(user_id=1, chat_id=101, photo_token="one")
+            context = _FakeContext(application)
+
+            await photo_entry(update, context)
+            image_id = context.user_data[PENDING_SUBMISSION_KEY]["image_id"]
+
+            await _submit_photo(update, context, show_caption=False)
+            await process_queued_upload(application, image_id)
+
+            self.assertEqual(len(update.effective_message.replies), 1)
+            self.assertEqual(len(application.bot.messages), 1)
+            _, text = application.bot.messages[0]
+            self.assertEqual(text, "Das Bild wird jetzt angezeigt.")
+            self.assertNotIn("Bild-ID", text)
+
+    async def test_process_queued_upload_sends_cooldown_wait_message_without_image_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            application = _FakeApplication(services)
+            services.database.set_setting("new_image_cooldown", "3600")
+            services.database.set_setting(
+                "last_new_image_displayed_at",
+                datetime.now(timezone.utc).isoformat(),
+            )
+
+            original = services.storage.original_path("img-1")
+            original.parent.mkdir(parents=True, exist_ok=True)
+            original.write_bytes(b"original")
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=555,
+                    local_original_path=str(original),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="queued",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+
+            await process_queued_upload(application, "img-1")
+
+            record = services.database.get_image_by_id("img-1")
+            self.assertEqual(record.status, "rendered")
+            self.assertEqual(len(application.bot.messages), 1)
+            _, text = application.bot.messages[0]
+            self.assertIn("Das Bild befindet sich in der Warteschlange", text)
+            self.assertIn("voraussichtlich", text)
+            self.assertNotIn("Bild-ID", text)
+
+    async def test_process_queued_upload_sends_orientation_wait_message_without_image_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            display = _FakeDisplay(orientation="vertical")
+            services = _build_services(tmpdir_path, display=display)
+            application = _FakeApplication(services)
+
+            original = services.storage.original_path("img-1")
+            original.parent.mkdir(parents=True, exist_ok=True)
+            original.write_bytes(b"original")
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=555,
+                    local_original_path=str(original),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="queued",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+
+            await process_queued_upload(application, "img-1")
+
+            record = services.database.get_image_by_id("img-1")
+            self.assertEqual(record.status, "rendered")
+            self.assertEqual(len(application.bot.messages), 1)
+            _, text = application.bot.messages[0]
+            self.assertIn("Das Bild wartet in der Warteschlange", text)
+            self.assertIn("Querformat", text)
+            self.assertNotIn("Bild-ID", text)
+
+    async def test_submit_photo_reports_enqueue_failure_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            application = _FakeApplication(services)
+            application.bot_data["upload_queue"] = _FailingQueue(RuntimeError("queue offline"))
+            update = _FakeUpdate(user_id=1, chat_id=101, photo_token="one")
+            context = _FakeContext(application)
+
+            await photo_entry(update, context)
+            image_id = context.user_data[PENDING_SUBMISSION_KEY]["image_id"]
+
+            await _submit_photo(update, context, show_caption=False)
+
+            self.assertEqual(len(update.effective_message.replies), 2)
+            self.assertEqual(update.effective_message.replies[-1], "Verarbeitung fehlgeschlagen: queue offline")
+            self.assertNotIn("Bild-ID", update.effective_message.replies[-1])
+            self.assertEqual(services.database.get_image_by_id(image_id).status, "failed")
 
     async def test_process_queued_upload_keeps_image_listed_when_completion_message_times_out(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -239,6 +362,14 @@ class _FakeMessage:
 
     async def reply_text(self, text: str, reply_markup=None, write_timeout: int = 60) -> None:
         self.replies.append(text)
+
+
+class _FailingQueue:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    async def put(self, item: str) -> None:
+        raise self.exc
 
 
 class _FakeUser:
