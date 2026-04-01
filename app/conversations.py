@@ -732,6 +732,7 @@ async def _conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TY
 def build_photo_conversation() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[MessageHandler(filters.PHOTO & ~filters.COMMAND, photo_entry)],
+        fallbacks=[],
         states={
             WAITING_FOR_TEXT_CHOICE: [
                 CallbackQueryHandler(photo_button_callback, pattern=r"^photo_"),

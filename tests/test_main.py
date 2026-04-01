@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from telegram import Update
 
 from app import main as app_main
+from app.bot import build_application
+from app.database import Database
 
 
 class MainTests(unittest.TestCase):
@@ -51,6 +54,45 @@ class MainTests(unittest.TestCase):
         kwargs = mock_application.run_polling.call_args.kwargs
         self.assertEqual(kwargs["allowed_updates"], Update.ALL_TYPES)
         self.assertNotIn("drop_pending_updates", kwargs)
+
+    def test_build_application_succeeds_with_real_conversation_handlers(self) -> None:
+        with patch("telegram.ext.ExtBot.initialize", new=Mock()), patch(
+            "telegram.ext.ExtBot.shutdown",
+            new=Mock(),
+        ):
+            database = Database(Path("/tmp/test-build-application.db"))
+            database.initialize()
+            services = SimpleNamespace(
+                config=SimpleNamespace(
+                    telegram=SimpleNamespace(bot_token="token"),
+                    storage=SimpleNamespace(
+                        current_payload_path=Path("/tmp/current.json"),
+                        current_image_path=Path("/tmp/current.png"),
+                    ),
+                ),
+                auth=SimpleNamespace(
+                    sync_user=lambda user: None,
+                    is_whitelisted=lambda user_id: True,
+                    is_admin=lambda user_id: True,
+                ),
+                database=database,
+                display=SimpleNamespace(
+                    current_orientation=lambda: "horizontal",
+                    get_slideshow_interval=lambda: 86400,
+                    get_sleep_schedule=lambda: None,
+                    runtime_settings_diagnostics=lambda: {"degraded": False, "message": ""},
+                ),
+                storage=SimpleNamespace(
+                    rendered_path=lambda image_id: Path(f"/tmp/{image_id}.png"),
+                    healthcheck=lambda: True,
+                ),
+                renderer=SimpleNamespace(render=lambda *args, **kwargs: None),
+            )
+
+            application = build_application(services)
+
+            self.assertIsNotNone(application)
+            database.close()
 
 
 if __name__ == "__main__":

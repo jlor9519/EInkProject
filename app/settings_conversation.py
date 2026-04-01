@@ -1061,6 +1061,7 @@ def build_settings_conversation() -> ConversationHandler:
             CommandHandler("settings", settings_entry),
             CallbackQueryHandler(settings_callback, pattern=r"^settings\|open$"),
         ],
+        fallbacks=[],
         states={
             WAITING_FOR_SETTINGS_CHOICE: [
                 CallbackQueryHandler(settings_callback, pattern=r"^settings\|"),
