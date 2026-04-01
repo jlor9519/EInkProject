@@ -243,6 +243,53 @@ class DatabaseTests(unittest.TestCase):
             database.mark_maintenance_job_notified("job-1")
             self.assertEqual(database.get_unnotified_finished_maintenance_jobs(), [])
 
+    def test_recover_stale_queued_update_job_marks_it_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+            database.create_maintenance_job(
+                job_id="job-stale-queued",
+                kind="update",
+                requested_by_user_id=111,
+                telegram_chat_id=222,
+                log_path="/tmp/job-stale-queued.log",
+                unit_name="photo-frame-update-job-stale",
+            )
+
+            recovered = database.recover_stale_update_jobs()
+            job = database.get_maintenance_job("job-stale-queued")
+
+            self.assertEqual([record.job_id for record in recovered], ["job-stale-queued"])
+            self.assertIsNotNone(job)
+            assert job is not None
+            self.assertEqual(job.status, "failed")
+            self.assertEqual(job.last_error, "stale maintenance job recovered after restart")
+            self.assertIsNone(database.get_active_maintenance_job())
+
+    def test_recover_stale_running_update_job_marks_it_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+            database.create_maintenance_job(
+                job_id="job-stale-running",
+                kind="update",
+                requested_by_user_id=111,
+                telegram_chat_id=222,
+                log_path="/tmp/job-stale-running.log",
+                unit_name="photo-frame-update-job-stale",
+            )
+            database.mark_maintenance_job_running("job-stale-running")
+
+            recovered = database.recover_stale_update_jobs()
+            job = database.get_maintenance_job("job-stale-running")
+
+            self.assertEqual([record.job_id for record in recovered], ["job-stale-running"])
+            self.assertIsNotNone(job)
+            assert job is not None
+            self.assertEqual(job.status, "failed")
+            self.assertEqual(job.last_error, "stale maintenance job recovered after restart")
+            self.assertIsNone(database.get_active_maintenance_job())
+
     def test_get_all_displayed_images_ordered_wraps_around(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             database = Database(Path(tmpdir) / "frame.db")

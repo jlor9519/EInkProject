@@ -332,6 +332,43 @@ class Database:
             ).fetchall()
             return [self._row_to_maintenance_job(row) for row in rows]
 
+    def recover_stale_update_jobs(self) -> list[MaintenanceJobRecord]:
+        finished_at = utcnow_iso()
+        stale_error = "stale maintenance job recovered after restart"
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM maintenance_jobs
+                WHERE kind = 'update' AND status IN ('queued', 'running')
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+            if not rows:
+                return []
+
+            job_ids = [row["job_id"] for row in rows]
+            placeholders = ", ".join("?" for _ in job_ids)
+            self._connection.execute(
+                f"""
+                UPDATE maintenance_jobs
+                SET status = 'failed',
+                    finished_at = COALESCE(finished_at, ?),
+                    last_error = ?
+                WHERE job_id IN ({placeholders})
+                """,
+                (finished_at, stale_error, *job_ids),
+            )
+            self._connection.commit()
+            updated_rows = self._connection.execute(
+                f"""
+                SELECT * FROM maintenance_jobs
+                WHERE job_id IN ({placeholders})
+                ORDER BY created_at ASC
+                """,
+                job_ids,
+            ).fetchall()
+            return [self._row_to_maintenance_job(row) for row in updated_rows]
+
     def get_unnotified_finished_maintenance_jobs(self) -> list[MaintenanceJobRecord]:
         with self._lock:
             rows = self._connection.execute(

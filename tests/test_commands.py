@@ -485,6 +485,7 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Liste", labels)
         self.assertIn("Löschen", labels)
         self.assertIn("Einstellungen", labels)
+        self.assertIn("Schließen", labels)
         self.assertIn("/settings - Anzeigeeinstellungen anzeigen/ändern", update.effective_message.replies[0])
 
     async def test_status_command_adds_admin_quick_actions(self) -> None:
@@ -539,7 +540,7 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Vorheriges", labels)
             self.assertIn("Nächstes", labels)
             self.assertIn("Löschen", labels)
-            self.assertIn("Neu laden", labels)
+            self.assertNotIn("Neu laden", labels)
 
     async def test_command_action_callback_edits_status_message(self) -> None:
         services = _build_services(Path(tempfile.mkdtemp()), is_admin=True)
@@ -587,7 +588,7 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("Bilderliste", update.callback_query.text_edits[0])
             labels = [button.text for row in update.callback_query.text_edit_markups[0].inline_keyboard for button in row]
-            self.assertIn("Neu laden", labels)
+            self.assertNotIn("Neu laden", labels)
 
     async def test_command_action_callback_runs_next_and_delete_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -646,6 +647,16 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(services.display.display_calls[-1], "img-next")
             self.assertEqual(next_update.callback_query.message.replies[-1], "Bild 2 von 2: img-next")
             self.assertIn("Bilder zum Löschen", delete_update.callback_query.message.replies[-1])
+
+    async def test_command_action_callback_close_deletes_message(self) -> None:
+        services = _build_services(Path(tempfile.mkdtemp()))
+        update = _FakeUpdate(data="cmd|close", has_media=False)
+        context = _FakeContext(services)
+
+        await command_action_callback(update, context)
+
+        self.assertEqual(context.bot.deleted_messages, [(111, 222)])
+        self.assertEqual(update.callback_query.text_edits, [])
 
 
 class _FakeQueryMessage:
@@ -710,8 +721,10 @@ class _MessageUpdate:
 
 class _FakeContext:
     def __init__(self, services, *, with_job_queue: bool = False) -> None:
+        self.bot = _FakeBot()
         self.application = SimpleNamespace(
             bot_data={"services": services, "display_lock": asyncio.Lock()},
+            bot=self.bot,
             job_queue=_FakeJobQueue() if with_job_queue else None,
         )
         self.user_data: dict[str, object] = {}
@@ -772,6 +785,14 @@ class _FakeJobQueue:
     def run_repeating(self, callback, *, interval: int, first: int, name: str) -> _FakeJob:
         self.calls.append({"interval": interval, "first": first, "name": name})
         return _FakeJob()
+
+
+class _FakeBot:
+    def __init__(self) -> None:
+        self.deleted_messages: list[tuple[int | None, int | None]] = []
+
+    async def delete_message(self, chat_id=None, message_id=None) -> None:
+        self.deleted_messages.append((chat_id, message_id))
 
 
 def _build_services(base_dir: Path, *, is_admin: bool = False):

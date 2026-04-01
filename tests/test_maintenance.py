@@ -66,6 +66,32 @@ class MaintenanceCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(application.bot.messages, [(333, "Der Raspberry Pi ist wieder online.")])
             self.assertIsNotNone(services.database.get_maintenance_job("job-restart").notified_at)
 
+    async def test_notify_maintenance_updates_reports_stale_update_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "logs" / "update.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("line 1\nline 2\n", encoding="utf-8")
+            services = _build_services(Path(tmpdir))
+            services.database.create_maintenance_job(
+                job_id="job-update-stale",
+                kind="update",
+                requested_by_user_id=1,
+                telegram_chat_id=444,
+                log_path=str(log_path),
+                unit_name="photo-frame-update-job",
+                status="queued",
+            )
+            application = _FakeApplication(services)
+
+            await notify_maintenance_updates(application)
+
+            self.assertEqual(len(application.bot.messages), 1)
+            chat_id, text = application.bot.messages[0]
+            self.assertEqual(chat_id, 444)
+            self.assertIn("Update fehlgeschlagen.", text)
+            self.assertIn("stale maintenance job recovered after restart", text)
+            self.assertIsNotNone(services.database.get_maintenance_job("job-update-stale").notified_at)
+
     def test_launch_runner_uses_systemd_run_with_detached_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             services = _build_services(Path(tmpdir))

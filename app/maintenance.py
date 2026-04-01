@@ -160,6 +160,14 @@ async def notify_maintenance_updates(application: Application) -> None:
     for job in reboot_jobs:
         await _notify_maintenance_job(application, job)
 
+    stale_update_jobs = services.database.recover_stale_update_jobs()
+    for job in stale_update_jobs:
+        logger.warning(
+            "Recovered stale maintenance job %s (%s) with prior status cleared on startup",
+            job.job_id,
+            job.kind,
+        )
+
     finished_jobs = services.database.get_unnotified_finished_maintenance_jobs()
     for job in finished_jobs:
         await _notify_maintenance_job(application, job)

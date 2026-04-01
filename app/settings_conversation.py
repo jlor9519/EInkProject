@@ -10,7 +10,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 
 from app.auth import require_admin
-from app.commands import _display_target, _edit_query_message, get_display_lock, get_services
+from app.commands import _delete_query_message, _display_target, _edit_query_message, get_display_lock, get_services
 from app.database import utcnow_iso
 from app.orientation import format_orientation_label, normalize_orientation_value
 
@@ -162,39 +162,33 @@ def _load_settings_snapshot(services) -> dict[str, Any]:
     return device_settings
 
 
-def _format_settings_list(settings: dict[str, Any], notice: str | None = None) -> str:
-    lines: list[str] = []
+def _format_settings_menu_text(notice: str | None = None) -> str:
     if notice:
-        lines.extend([notice, ""])
-    lines.extend(["Aktuelle Einstellungen:", ""])
-    for i, s in enumerate(_SETTINGS, 1):
-        lines.append(f"{i}. {s.label}: {_get_current_value(settings, s)}")
-    lines.append("")
-    lines.append("Wähle eine Einstellung per Button oder nutze /cancel.")
-    return "\n".join(lines)
+        return f"{notice}\n\nEinstellungen"
+    return "Einstellungen"
 
 
-def _settings_menu_keyboard() -> InlineKeyboardMarkup:
+def _settings_menu_keyboard(settings: dict[str, Any]) -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton("1. Sättigung", callback_data=_settings_callback_data("select", 0)),
-            InlineKeyboardButton("2. Kontrast", callback_data=_settings_callback_data("select", 1)),
+            InlineKeyboardButton(f"Sättigung: {_get_current_value(settings, _SETTINGS[0])}", callback_data=_settings_callback_data("select", 0)),
+            InlineKeyboardButton(f"Kontrast: {_get_current_value(settings, _SETTINGS[1])}", callback_data=_settings_callback_data("select", 1)),
         ],
         [
-            InlineKeyboardButton("3. Schärfe", callback_data=_settings_callback_data("select", 2)),
-            InlineKeyboardButton("4. Helligkeit", callback_data=_settings_callback_data("select", 3)),
+            InlineKeyboardButton(f"Schärfe: {_get_current_value(settings, _SETTINGS[2])}", callback_data=_settings_callback_data("select", 2)),
+            InlineKeyboardButton(f"Helligkeit: {_get_current_value(settings, _SETTINGS[3])}", callback_data=_settings_callback_data("select", 3)),
         ],
         [
-            InlineKeyboardButton("5. Ausrichtung", callback_data=_settings_callback_data("select", 4)),
-            InlineKeyboardButton("6. Bildanpassung", callback_data=_settings_callback_data("select", 5)),
+            InlineKeyboardButton(f"Ausrichtung: {_get_current_value(settings, _SETTINGS[4])}", callback_data=_settings_callback_data("select", 4)),
+            InlineKeyboardButton(f"Bildanpassung: {_get_current_value(settings, _SETTINGS[5])}", callback_data=_settings_callback_data("select", 5)),
         ],
         [
-            InlineKeyboardButton("7. Anzeigedauer", callback_data=_settings_callback_data("select", 6)),
-            InlineKeyboardButton("8. Ruhezeit", callback_data=_settings_callback_data("select", 7)),
+            InlineKeyboardButton(f"Anzeigedauer: {_get_current_value(settings, _SETTINGS[6])}", callback_data=_settings_callback_data("select", 6)),
+            InlineKeyboardButton(f"Ruhezeit: {_get_current_value(settings, _SETTINGS[7])}", callback_data=_settings_callback_data("select", 7)),
         ],
         [
-            InlineKeyboardButton("9. Neue Bilder", callback_data=_settings_callback_data("select", 8)),
-            InlineKeyboardButton("10. Täglicher Wechsel", callback_data=_settings_callback_data("select", 9)),
+            InlineKeyboardButton(f"Neue Bilder: {_get_current_value(settings, _SETTINGS[8])}", callback_data=_settings_callback_data("select", 8)),
+            InlineKeyboardButton(f"Täglicher Wechsel: {_get_current_value(settings, _SETTINGS[9])}", callback_data=_settings_callback_data("select", 9)),
         ],
         [InlineKeyboardButton("Schließen", callback_data=_settings_callback_data("close"))],
     ]
@@ -398,6 +392,13 @@ async def _respond_settings_message(
         await update.effective_message.reply_text(text, reply_markup=reply_markup)
 
 
+async def _delete_settings_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await _delete_query_message(context, query)
+
+
 async def _show_settings_menu(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -414,8 +415,8 @@ async def _show_settings_menu(
         return ConversationHandler.END
     await _respond_settings_message(
         update,
-        _format_settings_list(snapshot, notice),
-        reply_markup=_settings_menu_keyboard(),
+        _format_settings_menu_text(notice),
+        reply_markup=_settings_menu_keyboard(snapshot),
     )
     return WAITING_FOR_SETTINGS_CHOICE
 
@@ -465,7 +466,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return await _show_settings_menu(update, context)
     if action == "close":
         context.user_data.pop(PENDING_SETTINGS_KEY, None)
-        await _respond_settings_message(update, "Einstellungs-Menü geschlossen.")
+        await _delete_settings_message(update, context)
         return ConversationHandler.END
     if action == "back":
         return await _show_settings_menu(update, context)

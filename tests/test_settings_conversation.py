@@ -42,16 +42,16 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         self.assertEqual(len(update.effective_message.replies), 1)
         reply = update.effective_message.replies[0]
-        self.assertIn("1. Sättigung", reply)
-        self.assertIn("2. Kontrast", reply)
-        self.assertIn("3. Schärfe", reply)
-        self.assertIn("4. Helligkeit", reply)
-        self.assertIn("5. Ausrichtung: Hochformat", reply)
-        self.assertIn("6. Bildanpassung", reply)
-        self.assertIn("10. Täglicher Bildwechsel", reply)
+        self.assertEqual(reply, "Einstellungen")
         markup = update.effective_message.reply_markups[0]
         labels = [button.text for row in markup.inline_keyboard for button in row]
-        self.assertIn("5. Ausrichtung", labels)
+        self.assertIn("Sättigung: 1.4", labels)
+        self.assertIn("Kontrast: 1.4", labels)
+        self.assertIn("Schärfe: 1.2", labels)
+        self.assertIn("Helligkeit: 1.1", labels)
+        self.assertIn("Ausrichtung: Hochformat", labels)
+        self.assertIn("Bildanpassung: Zuschneiden", labels)
+        self.assertIn("Täglicher Wechsel: Deaktiviert", labels)
         self.assertIn("Schließen", labels)
 
     async def test_settings_callback_opens_prompt_from_button(self) -> None:
@@ -79,7 +79,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         self.assertNotIn(PENDING_SETTINGS_KEY, context.user_data)
-        self.assertIn("Aktuelle Einstellungen:", update.callback_query.text_edits[0])
+        self.assertEqual(update.callback_query.text_edits[0], "Einstellungen")
 
     async def test_settings_callback_close_ends_conversation(self) -> None:
         services = _FakeServices(is_admin=True)
@@ -91,7 +91,8 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, ConversationHandler.END)
         self.assertNotIn(PENDING_SETTINGS_KEY, context.user_data)
-        self.assertEqual(update.callback_query.text_edits[0], "Einstellungs-Menü geschlossen.")
+        self.assertEqual(context.bot.deleted_messages, [(111, 222)])
+        self.assertEqual(update.callback_query.text_edits, [])
 
     async def test_scheduled_time_setting_can_be_set_and_cleared(self) -> None:
         services = _FakeServices(is_admin=True)
@@ -144,7 +145,9 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         reply = update.effective_message.replies[0]
-        self.assertIn("08:30", reply)
+        self.assertEqual(reply, "Einstellungen")
+        labels = [button.text for row in update.effective_message.reply_markups[0].inline_keyboard for button in row]
+        self.assertIn("Täglicher Wechsel: 08:30", labels)
 
     async def test_interval_change_resets_timer_from_now(self) -> None:
         services = _FakeServices(is_admin=True)
@@ -289,6 +292,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
         self.assertEqual(services.display.last_updates, {"orientation": "horizontal", "inverted_image": False})
         self.assertIn("Ausrichtung ist jetzt Querformat", update.callback_query.text_edits[0])
+        self.assertIn("\n\nEinstellungen", update.callback_query.text_edits[0])
         labels = [button.text for row in update.callback_query.text_edit_markups[0].inline_keyboard for button in row]
         self.assertIn("Schließen", labels)
 
@@ -462,6 +466,8 @@ class _FakeMessage:
         self.text = text
         self.replies: list[str] = []
         self.reply_markups: list[object | None] = []
+        self.chat_id = 111
+        self.message_id = 222
 
     async def reply_text(self, text: str, **kwargs) -> None:
         self.replies.append(text)
@@ -508,8 +514,10 @@ class _FakeCallbackUpdate:
 
 class _FakeContext:
     def __init__(self, services: _FakeServices, *, with_job_queue: bool = False):
+        self.bot = _FakeBot()
         self.application = SimpleNamespace(
             bot_data={"services": services, "display_lock": asyncio.Lock()},
+            bot=self.bot,
             job_queue=_FakeJobQueue() if with_job_queue else None,
         )
         self.user_data: dict[str, object] = {}
@@ -530,6 +538,14 @@ class _FakeJobQueue:
     def run_repeating(self, callback, *, interval: int, first: int, name: str) -> _FakeJob:
         self.calls.append({"interval": interval, "first": first, "name": name})
         return _FakeJob()
+
+
+class _FakeBot:
+    def __init__(self) -> None:
+        self.deleted_messages: list[tuple[int | None, int | None]] = []
+
+    async def delete_message(self, chat_id=None, message_id=None) -> None:
+        self.deleted_messages.append((chat_id, message_id))
 
 
 class _RealishDisplay:

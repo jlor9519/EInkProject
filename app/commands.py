@@ -45,6 +45,7 @@ def _quick_actions_help(is_admin: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton("Vorheriges", callback_data=_command_callback_data("prev")),
             InlineKeyboardButton("Nächstes", callback_data=_command_callback_data("next")),
         ],
+        [InlineKeyboardButton("Schließen", callback_data=_command_callback_data("close"))],
     ]
     if is_admin:
         rows.append([InlineKeyboardButton("Einstellungen", callback_data="settings|open")])
@@ -74,10 +75,7 @@ def _quick_actions_list() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Vorheriges", callback_data=_command_callback_data("prev")),
                 InlineKeyboardButton("Nächstes", callback_data=_command_callback_data("next")),
             ],
-            [
-                InlineKeyboardButton("Löschen", callback_data=_command_callback_data("delete")),
-                InlineKeyboardButton("Neu laden", callback_data=_command_callback_data("list")),
-            ],
+            [InlineKeyboardButton("Löschen", callback_data=_command_callback_data("delete"))],
         ]
     )
 
@@ -454,6 +452,9 @@ async def command_action_callback(update: Update, context: ContextTypes.DEFAULT_
         return
     if action == "help":
         await _edit_query_message(query, _build_help_text(is_admin), reply_markup=_quick_actions_help(is_admin))
+        return
+    if action == "close":
+        await _delete_query_message(context, query)
         return
     if action == "next":
         await next_command(update, context)
@@ -971,3 +972,25 @@ async def _edit_query_message(query, text: str, reply_markup: InlineKeyboardMark
             if "message is not modified" in str(caption_exc).lower():
                 return
             logger.warning("Could not edit query message")
+
+
+async def _delete_query_message(context: ContextTypes.DEFAULT_TYPE, query) -> None:
+    message = query.message
+    chat_id = getattr(message, "chat_id", None)
+    message_id = getattr(message, "message_id", None)
+
+    try:
+        if hasattr(context, "bot"):
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            return
+        app_bot = getattr(context.application, "bot", None)
+        if app_bot is not None:
+            await app_bot.delete_message(chat_id=chat_id, message_id=message_id)
+            return
+    except Exception:
+        pass
+
+    try:
+        await _edit_query_message(query, "", reply_markup=None)
+    except Exception:
+        logger.warning("Could not delete or clear query message")
