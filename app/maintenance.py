@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 MAINTENANCE_LOCK_KEY = "maintenance_lock"
 MAINTENANCE_KINDS = {"restart", "update"}
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+UPDATE_QUEUED_STALE_SECONDS = 60
+UPDATE_RUNNING_STALE_SECONDS = 600
+STARTUP_STALE_UPDATE_REASON = "stale maintenance job recovered after restart"
+PREFLIGHT_STALE_UPDATE_REASON = "stale maintenance job recovered before new update request"
 
 
 def get_maintenance_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
@@ -99,11 +103,26 @@ async def maintenance_confirm_callback(update: Update, context: ContextTypes.DEF
 
     lock = get_maintenance_lock(context)
     async with lock:
+        if job_kind == "update":
+            recovered_jobs = services.database.recover_stale_update_jobs(
+                max_queued_age_seconds=UPDATE_QUEUED_STALE_SECONDS,
+                max_running_age_seconds=UPDATE_RUNNING_STALE_SECONDS,
+                reason=PREFLIGHT_STALE_UPDATE_REASON,
+            )
+            for recovered_job in recovered_jobs:
+                logger.warning(
+                    "Recovered stale maintenance job %s (%s) before starting a new update",
+                    recovered_job.job_id,
+                    recovered_job.status,
+                )
+                await _notify_maintenance_job(context.application, recovered_job)
+
         active_job = services.database.get_active_maintenance_job()
         if active_job is not None:
             await _edit_query_message(
                 query,
-                f"Es läuft bereits ein Wartungsvorgang: `{_job_label(active_job.kind)}`.",
+                f"Es läuft bereits ein Wartungsvorgang: `{_job_label(active_job.kind)}` "
+                f"(Status: `{active_job.status}`).",
             )
             return
 
@@ -160,7 +179,9 @@ async def notify_maintenance_updates(application: Application) -> None:
     for job in reboot_jobs:
         await _notify_maintenance_job(application, job)
 
-    stale_update_jobs = services.database.recover_stale_update_jobs()
+    stale_update_jobs = services.database.recover_stale_update_jobs(
+        reason=STARTUP_STALE_UPDATE_REASON,
+    )
     for job in stale_update_jobs:
         logger.warning(
             "Recovered stale maintenance job %s (%s) with prior status cleared on startup",

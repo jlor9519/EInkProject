@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.database import Database
@@ -243,7 +244,7 @@ class DatabaseTests(unittest.TestCase):
             database.mark_maintenance_job_notified("job-1")
             self.assertEqual(database.get_unnotified_finished_maintenance_jobs(), [])
 
-    def test_recover_stale_queued_update_job_marks_it_failed(self) -> None:
+    def test_recover_stale_queued_update_job_marks_it_failed_in_startup_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             database = Database(Path(tmpdir) / "frame.db")
             database.initialize()
@@ -266,7 +267,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(job.last_error, "stale maintenance job recovered after restart")
             self.assertIsNone(database.get_active_maintenance_job())
 
-    def test_recover_stale_running_update_job_marks_it_failed(self) -> None:
+    def test_recover_stale_running_update_job_marks_it_failed_in_startup_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             database = Database(Path(tmpdir) / "frame.db")
             database.initialize()
@@ -289,6 +290,127 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(job.status, "failed")
             self.assertEqual(job.last_error, "stale maintenance job recovered after restart")
             self.assertIsNone(database.get_active_maintenance_job())
+
+    def test_recover_stale_update_jobs_recovers_only_old_queued_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+            database.create_maintenance_job(
+                job_id="job-old-queued",
+                kind="update",
+                requested_by_user_id=111,
+                telegram_chat_id=222,
+                log_path="/tmp/job-old-queued.log",
+                unit_name="photo-frame-update-job-old",
+            )
+            database.create_maintenance_job(
+                job_id="job-fresh-queued",
+                kind="update",
+                requested_by_user_id=111,
+                telegram_chat_id=222,
+                log_path="/tmp/job-fresh-queued.log",
+                unit_name="photo-frame-update-job-fresh",
+            )
+            old_created_at = (datetime.now(timezone.utc) - timedelta(seconds=61)).isoformat()
+            database._connection.execute(  # noqa: SLF001 - test setup
+                "UPDATE maintenance_jobs SET created_at = ? WHERE job_id = ?",
+                (old_created_at, "job-old-queued"),
+            )
+            database._connection.commit()  # noqa: SLF001 - test setup
+
+            recovered = database.recover_stale_update_jobs(
+                max_queued_age_seconds=60,
+                max_running_age_seconds=600,
+                reason="stale maintenance job recovered before new update request",
+            )
+
+            self.assertEqual([job.job_id for job in recovered], ["job-old-queued"])
+            self.assertEqual(database.get_maintenance_job("job-old-queued").status, "failed")
+            self.assertEqual(database.get_maintenance_job("job-fresh-queued").status, "queued")
+
+    def test_recover_stale_update_jobs_keeps_fresh_queued_jobs_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+            database.create_maintenance_job(
+                job_id="job-fresh-queued",
+                kind="update",
+                requested_by_user_id=111,
+                telegram_chat_id=222,
+                log_path="/tmp/job-fresh-queued.log",
+                unit_name="photo-frame-update-job-fresh",
+            )
+
+            recovered = database.recover_stale_update_jobs(
+                max_queued_age_seconds=60,
+                max_running_age_seconds=600,
+                reason="stale maintenance job recovered before new update request",
+            )
+
+            self.assertEqual(recovered, [])
+            self.assertEqual(database.get_maintenance_job("job-fresh-queued").status, "queued")
+
+    def test_recover_stale_update_jobs_recovers_only_old_running_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+            database.create_maintenance_job(
+                job_id="job-old-running",
+                kind="update",
+                requested_by_user_id=111,
+                telegram_chat_id=222,
+                log_path="/tmp/job-old-running.log",
+                unit_name="photo-frame-update-job-old",
+            )
+            database.create_maintenance_job(
+                job_id="job-fresh-running",
+                kind="update",
+                requested_by_user_id=111,
+                telegram_chat_id=222,
+                log_path="/tmp/job-fresh-running.log",
+                unit_name="photo-frame-update-job-fresh",
+            )
+            database.mark_maintenance_job_running("job-old-running")
+            database.mark_maintenance_job_running("job-fresh-running")
+            old_started_at = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+            database._connection.execute(  # noqa: SLF001 - test setup
+                "UPDATE maintenance_jobs SET started_at = ? WHERE job_id = ?",
+                (old_started_at, "job-old-running"),
+            )
+            database._connection.commit()  # noqa: SLF001 - test setup
+
+            recovered = database.recover_stale_update_jobs(
+                max_queued_age_seconds=60,
+                max_running_age_seconds=600,
+                reason="stale maintenance job recovered before new update request",
+            )
+
+            self.assertEqual([job.job_id for job in recovered], ["job-old-running"])
+            self.assertEqual(database.get_maintenance_job("job-old-running").status, "failed")
+            self.assertEqual(database.get_maintenance_job("job-fresh-running").status, "running")
+
+    def test_recover_stale_update_jobs_keeps_fresh_running_jobs_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+            database.create_maintenance_job(
+                job_id="job-fresh-running",
+                kind="update",
+                requested_by_user_id=111,
+                telegram_chat_id=222,
+                log_path="/tmp/job-fresh-running.log",
+                unit_name="photo-frame-update-job-fresh",
+            )
+            database.mark_maintenance_job_running("job-fresh-running")
+
+            recovered = database.recover_stale_update_jobs(
+                max_queued_age_seconds=60,
+                max_running_age_seconds=600,
+                reason="stale maintenance job recovered before new update request",
+            )
+
+            self.assertEqual(recovered, [])
+            self.assertEqual(database.get_maintenance_job("job-fresh-running").status, "running")
 
     def test_get_all_displayed_images_ordered_wraps_around(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

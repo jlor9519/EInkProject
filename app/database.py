@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -332,9 +333,15 @@ class Database:
             ).fetchall()
             return [self._row_to_maintenance_job(row) for row in rows]
 
-    def recover_stale_update_jobs(self) -> list[MaintenanceJobRecord]:
+    def recover_stale_update_jobs(
+        self,
+        *,
+        max_queued_age_seconds: int | None = None,
+        max_running_age_seconds: int | None = None,
+        reason: str = "stale maintenance job recovered after restart",
+    ) -> list[MaintenanceJobRecord]:
         finished_at = utcnow_iso()
-        stale_error = "stale maintenance job recovered after restart"
+        now = datetime.now(timezone.utc)
         with self._lock:
             rows = self._connection.execute(
                 """
@@ -346,7 +353,19 @@ class Database:
             if not rows:
                 return []
 
-            job_ids = [row["job_id"] for row in rows]
+            job_ids = [
+                row["job_id"]
+                for row in rows
+                if self._is_stale_update_row(
+                    row,
+                    now=now,
+                    max_queued_age_seconds=max_queued_age_seconds,
+                    max_running_age_seconds=max_running_age_seconds,
+                )
+            ]
+            if not job_ids:
+                return []
+
             placeholders = ", ".join("?" for _ in job_ids)
             self._connection.execute(
                 f"""
@@ -356,7 +375,7 @@ class Database:
                     last_error = ?
                 WHERE job_id IN ({placeholders})
                 """,
-                (finished_at, stale_error, *job_ids),
+                (finished_at, reason, *job_ids),
             )
             self._connection.commit()
             updated_rows = self._connection.execute(
@@ -563,6 +582,45 @@ class Database:
                 (status, started_at, finished_at, last_error, job_id),
             )
             self._connection.commit()
+
+    @staticmethod
+    def _is_stale_update_row(
+        row: sqlite3.Row,
+        *,
+        now: datetime,
+        max_queued_age_seconds: int | None,
+        max_running_age_seconds: int | None,
+    ) -> bool:
+        status = row["status"]
+        if status == "queued":
+            if max_queued_age_seconds is None:
+                return True
+            reference = Database._parse_datetime(row["created_at"])
+            if reference is None:
+                return False
+            return (now - reference).total_seconds() >= max_queued_age_seconds
+
+        if status == "running":
+            if max_running_age_seconds is None:
+                return True
+            reference = Database._parse_datetime(row["started_at"] or row["created_at"])
+            if reference is None:
+                return False
+            return (now - reference).total_seconds() >= max_running_age_seconds
+
+        return False
+
+    @staticmethod
+    def _parse_datetime(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def reconcile_pending_images(self) -> list[ImageRecord]:
         with self._lock:

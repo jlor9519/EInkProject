@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -91,6 +92,126 @@ class MaintenanceCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Update fehlgeschlagen.", text)
             self.assertIn("stale maintenance job recovered after restart", text)
             self.assertIsNotNone(services.database.get_maintenance_job("job-update-stale").notified_at)
+
+    async def test_confirm_callback_recovers_stale_queued_update_and_starts_new_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            services.database.create_maintenance_job(
+                job_id="job-stale-queued",
+                kind="update",
+                requested_by_user_id=1,
+                telegram_chat_id=444,
+                log_path=str(Path(tmpdir) / "logs" / "stale-queued.log"),
+                unit_name="photo-frame-update-job-old",
+            )
+            old_created_at = (datetime.now(timezone.utc) - timedelta(seconds=61)).isoformat()
+            services.database._connection.execute(  # noqa: SLF001 - test setup
+                "UPDATE maintenance_jobs SET created_at = ? WHERE job_id = ?",
+                (old_created_at, "job-stale-queued"),
+            )
+            services.database._connection.commit()  # noqa: SLF001 - test setup
+            context = _FakeContext(services)
+            update = _CallbackUpdate(data="maintenance_confirm:update", user_id=1, chat_id=999)
+
+            with patch("app.maintenance._launch_maintenance_job_runner", return_value=None):
+                await maintenance_confirm_callback(update, context)
+
+            stale_job = services.database.get_maintenance_job("job-stale-queued")
+            self.assertEqual(stale_job.status, "failed")
+            self.assertEqual(stale_job.last_error, "stale maintenance job recovered before new update request")
+            self.assertIsNotNone(stale_job.notified_at)
+            self.assertEqual(context.application.bot.messages[0][0], 444)
+            self.assertIn("stale maintenance job recovered before new update request", context.application.bot.messages[0][1])
+
+            active_job = services.database.get_active_maintenance_job()
+            self.assertIsNotNone(active_job)
+            self.assertNotEqual(active_job.job_id, "job-stale-queued")
+            self.assertEqual(active_job.kind, "update")
+            self.assertEqual(update.callback_query.text_edits[-1], "Update wurde gestartet. Ich schicke nach dem Neustart das Ergebnis.")
+
+    async def test_confirm_callback_recovers_stale_running_update_and_starts_new_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            services.database.create_maintenance_job(
+                job_id="job-stale-running",
+                kind="update",
+                requested_by_user_id=1,
+                telegram_chat_id=444,
+                log_path=str(Path(tmpdir) / "logs" / "stale-running.log"),
+                unit_name="photo-frame-update-job-old",
+            )
+            services.database.mark_maintenance_job_running("job-stale-running")
+            old_started_at = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+            services.database._connection.execute(  # noqa: SLF001 - test setup
+                "UPDATE maintenance_jobs SET started_at = ? WHERE job_id = ?",
+                (old_started_at, "job-stale-running"),
+            )
+            services.database._connection.commit()  # noqa: SLF001 - test setup
+            context = _FakeContext(services)
+            update = _CallbackUpdate(data="maintenance_confirm:update", user_id=1, chat_id=999)
+
+            with patch("app.maintenance._launch_maintenance_job_runner", return_value=None):
+                await maintenance_confirm_callback(update, context)
+
+            stale_job = services.database.get_maintenance_job("job-stale-running")
+            self.assertEqual(stale_job.status, "failed")
+            self.assertEqual(stale_job.last_error, "stale maintenance job recovered before new update request")
+            self.assertIsNotNone(stale_job.notified_at)
+            self.assertEqual(context.application.bot.messages[0][0], 444)
+            self.assertIn("stale maintenance job recovered before new update request", context.application.bot.messages[0][1])
+
+            active_job = services.database.get_active_maintenance_job()
+            self.assertIsNotNone(active_job)
+            self.assertNotEqual(active_job.job_id, "job-stale-running")
+            self.assertEqual(active_job.kind, "update")
+
+    async def test_confirm_callback_blocks_when_running_update_is_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            services.database.create_maintenance_job(
+                job_id="job-fresh-running",
+                kind="update",
+                requested_by_user_id=1,
+                telegram_chat_id=444,
+                log_path=str(Path(tmpdir) / "logs" / "fresh-running.log"),
+                unit_name="photo-frame-update-job-old",
+            )
+            services.database.mark_maintenance_job_running("job-fresh-running")
+            context = _FakeContext(services)
+            update = _CallbackUpdate(data="maintenance_confirm:update", user_id=1, chat_id=999)
+
+            with patch("app.maintenance._launch_maintenance_job_runner", return_value=None):
+                await maintenance_confirm_callback(update, context)
+
+            self.assertEqual(
+                update.callback_query.text_edits,
+                ["Es läuft bereits ein Wartungsvorgang: `/update` (Status: `running`)."],
+            )
+            self.assertEqual(len(context.application.bot.messages), 0)
+
+    async def test_confirm_callback_does_not_recover_rebooting_restart_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            services.database.create_maintenance_job(
+                job_id="job-restart",
+                kind="restart",
+                requested_by_user_id=1,
+                telegram_chat_id=444,
+                log_path=str(Path(tmpdir) / "logs" / "restart.log"),
+                unit_name="photo-frame-restart-job",
+                status="rebooting",
+            )
+            context = _FakeContext(services)
+            update = _CallbackUpdate(data="maintenance_confirm:update", user_id=1, chat_id=999)
+
+            with patch("app.maintenance._launch_maintenance_job_runner", return_value=None):
+                await maintenance_confirm_callback(update, context)
+
+            self.assertEqual(
+                update.callback_query.text_edits,
+                ["Es läuft bereits ein Wartungsvorgang: `/restart` (Status: `rebooting`)."],
+            )
+            self.assertEqual(services.database.get_maintenance_job("job-restart").status, "rebooting")
 
     def test_launch_runner_uses_systemd_run_with_detached_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -189,6 +310,7 @@ class _FakeApplication:
 class _FakeContext:
     def __init__(self, services) -> None:
         self.application = SimpleNamespace(
+            bot=_FakeBot(),
             bot_data={
                 "services": services,
                 MAINTENANCE_LOCK_KEY: asyncio.Lock(),
