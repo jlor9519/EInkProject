@@ -20,7 +20,7 @@ from app.display_state import (
 )
 from app.fs_utils import safe_unlink
 from app.models import AppServices, DisplayRequest, DisplayResult, ImageRecord
-from app.orientation import format_orientation_label, orientation_matches
+from app.orientation import format_orientation_label
 
 COMMAND_CALLBACK_PREFIX = "cmd|"
 
@@ -154,7 +154,9 @@ async def _render_status_text(services: AppServices) -> str:
     else:
         inkypi_line = "✗ nicht erreichbar"
 
-    image_count = services.database.count_displayed_images(active_orientation)
+    rotation_count = services.database.count_rotation_pool_images(active_orientation)
+    hidden_count = services.database.count_hidden_rotation_images(active_orientation)
+    displayed_count = services.database.count_displayed_images(active_orientation)
     rendered_count = services.database.count_rendered_images(active_orientation)
     displayed_at = services.database.get_setting("current_image_displayed_at")
     user_count = services.database.count_whitelisted_users()
@@ -162,7 +164,9 @@ async def _render_status_text(services: AppServices) -> str:
 
     image_lines = [
         f"- Bibliothek: {format_orientation_label(active_orientation)}",
-        f"- In Rotation: {image_count} {'Bild' if image_count == 1 else 'Bilder'}",
+        f"- In Rotation: {rotation_count} {'Bild' if rotation_count == 1 else 'Bilder'}",
+        f"- Außerhalb der Rotation gespeichert: {hidden_count}",
+        f"- Davon aktuell angezeigt: {displayed_count} {'Bild' if displayed_count == 1 else 'Bilder'}",
         f"- Aktuelles Bild: {_format_duration(displayed_at)}",
     ]
     if rendered_count > 0:
@@ -225,15 +229,18 @@ async def _render_list_text(services: AppServices) -> str:
     next_images = services.database.get_next_images(current_image_id, 5, active_orientation)
     total = services.database.count_displayed_images(active_orientation)
     current_pos = services.database.get_displayed_image_position(current_image_id, active_orientation)
+    hidden_count = services.database.count_hidden_rotation_images(active_orientation)
+    current_in_rotation = services.database.is_image_in_rotation_pool(current_image_id, active_orientation)
 
     lines = [f"Bilderliste {format_orientation_label(active_orientation)} ({total} gesamt)", ""]
 
     current_record = services.database.get_image_by_id(current_image_id)
     current_label = _image_label(current_record) if current_record else "(unbekannt)"
-    if current_record and not orientation_matches(current_record.orientation_bucket, active_orientation):
+    if current_record and not current_in_rotation:
         lines.append(f"{current_label} (aktuell angezeigt, nicht Teil der aktuellen Bibliothek)")
     else:
         lines.append(f"{current_label}")
+    lines.append(f"Außerhalb der Rotation gespeichert: {hidden_count}")
 
     interval = await asyncio.to_thread(services.display.get_slideshow_interval)
 

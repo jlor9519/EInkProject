@@ -267,11 +267,58 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             await list_command(update_list, context)
 
             self.assertIn("Bibliothek: Hochformat", update_status.effective_message.replies[0])
-            self.assertIn("In Rotation: 2 Bilder", update_status.effective_message.replies[0])
+            self.assertIn("In Rotation: 3 Bilder", update_status.effective_message.replies[0])
+            self.assertIn("Außerhalb der Rotation gespeichert: 0", update_status.effective_message.replies[0])
             self.assertIn("Warteschlange: 1 neues Bild wartend", update_status.effective_message.replies[0])
+            self.assertIn("Außerhalb der Rotation gespeichert: 0", update_list.effective_message.replies[0])
             self.assertIn("Bilderliste Hochformat (2 gesamt)", update_list.effective_message.replies[0])
             self.assertIn("Horizontal", update_list.effective_message.replies[0])
             self.assertIn("nicht Teil der aktuellen Bibliothek", update_list.effective_message.replies[0])
+
+    async def test_status_and_list_show_hidden_images_outside_rotation_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.database.set_setting("rotation_limit", "2")
+            services.database.set_setting("slideshow_next_fire_at", "2099-01-01T00:00:00+00:00")
+            for index, image_id in enumerate(("img-old", "img-mid", "img-new")):
+                services.database.upsert_image(
+                    ImageRecord(
+                        image_id=image_id,
+                        telegram_file_id=f"file-{image_id}",
+                        telegram_chat_id=111,
+                        local_original_path=str(tmpdir_path / "incoming" / f"{image_id}.jpg"),
+                        local_rendered_path=None,
+                        location="",
+                        taken_at="",
+                        caption=image_id,
+                        uploaded_by=1,
+                        created_at=f"2026-03-18T12:{index:02d}:00+00:00",
+                        status="displayed",
+                        last_error=None,
+                        orientation_bucket="horizontal",
+                    )
+                )
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-old"}),
+                encoding="utf-8",
+            )
+
+            update_status = _MessageUpdate()
+            update_list = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await status_command(update_status, context)
+            await list_command(update_list, context)
+
+            self.assertIn("In Rotation: 2 Bilder", update_status.effective_message.replies[0])
+            self.assertIn("Außerhalb der Rotation gespeichert: 1", update_status.effective_message.replies[0])
+            self.assertIn("img-old", update_list.effective_message.replies[0])
+            self.assertIn("nicht Teil der aktuellen Bibliothek", update_list.effective_message.replies[0])
+            self.assertIn("Außerhalb der Rotation gespeichert: 1", update_list.effective_message.replies[0])
+            self.assertIn('"img-mid"', update_list.effective_message.replies[0])
+            self.assertIn('"img-new"', update_list.effective_message.replies[0])
 
     async def test_list_self_heals_stale_interval_timer_and_shows_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -473,6 +520,79 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(services.database.get_setting("last_new_image_displayed_at"))
             self.assertIsNotNone(services.database.get_setting("slideshow_next_fire_at"))
             self.assertEqual(update.effective_message.replies[-1], "Bild 2 von 2: img-next")
+
+    async def test_next_ignores_displayed_images_hidden_by_rotation_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.database.set_setting("rotation_limit", "2")
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-old"}),
+                encoding="utf-8",
+            )
+            for image_id in ("img-mid", "img-new"):
+                original = tmpdir_path / "incoming" / f"{image_id}.jpg"
+                original.parent.mkdir(parents=True, exist_ok=True)
+                original.write_bytes(image_id.encode("utf-8"))
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-old",
+                    telegram_file_id="file-old",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-old.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Old",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-mid",
+                    telegram_file_id="file-mid",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-mid.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Mid",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:05:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-new",
+                    telegram_file_id="file-new",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-new.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="New",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:10:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            update = _MessageUpdate()
+            context = _FakeContext(services, with_job_queue=True)
+
+            await next_command(update, context)
+
+            self.assertEqual(services.display.display_calls[-1], "img-mid")
+            self.assertEqual(update.effective_message.replies[-1], "Bild 1 von 2: img-mid")
 
     async def test_prev_ignores_rendered_waiting_images(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

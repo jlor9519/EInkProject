@@ -38,6 +38,7 @@ _SETTINGS: list[_SettingDef] = [
     _SettingDef("Ruhezeit",            "sleep_schedule",       None,         "sleep_schedule"),
     _SettingDef("Wartezeit neue Bilder", "new_image_cooldown", None,         "cooldown"),
     _SettingDef("Täglicher Bildwechsel", "scheduled_change_time", None,     "scheduled_time"),
+    _SettingDef("Bilder in Rotation",  "rotation_limit",       None,         "integer"),
 ]
 
 _FIT_MODE_LABELS = {"fill": "Zuschneiden", "contain": "Einpassen"}
@@ -119,7 +120,7 @@ def _get_current_value(settings: dict[str, Any], s: _SettingDef) -> str:
         raw = str(settings.get("image_fit_mode", "fill"))
         return _FIT_MODE_LABELS.get(raw, raw)
     if s.kind == "integer":
-        return str(settings.get(s.key, "50"))
+        return str(settings.get(s.key, "100"))
     if s.kind == "interval":
         raw = settings.get(s.key, 86400)
         try:
@@ -159,6 +160,11 @@ def _load_settings_snapshot(services) -> dict[str, Any]:
     schedule = services.display.get_sleep_schedule()
     device_settings["sleep_schedule"] = f"{schedule[0]}–{schedule[1]}" if schedule else ""
     device_settings["scheduled_change_time"] = services.database.get_setting("scheduled_change_time") or ""
+    rotation_limit_raw = services.database.get_setting("rotation_limit")
+    try:
+        device_settings["rotation_limit"] = int(rotation_limit_raw) if rotation_limit_raw is not None else 100
+    except (TypeError, ValueError):
+        device_settings["rotation_limit"] = 100
     return device_settings
 
 
@@ -189,6 +195,9 @@ def _settings_menu_keyboard(settings: dict[str, Any]) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(f"Neue Bilder: {_get_current_value(settings, _SETTINGS[8])}", callback_data=_settings_callback_data("select", 8)),
             InlineKeyboardButton(f"Täglicher Wechsel: {_get_current_value(settings, _SETTINGS[9])}", callback_data=_settings_callback_data("select", 9)),
+        ],
+        [
+            InlineKeyboardButton(f"Bilder in Rotation: {_get_current_value(settings, _SETTINGS[10])}", callback_data=_settings_callback_data("select", 10)),
         ],
         [InlineKeyboardButton("Abbrechen", callback_data=_settings_callback_data("close"))],
     ]
@@ -233,7 +242,7 @@ def _prompt_text_for_setting(services, idx: int, notice: str | None = None) -> s
         current_raw = services.database.get_setting("image_fit_mode") or "fill"
         current = _FIT_MODE_LABELS.get(current_raw, current_raw)
     elif s.kind == "integer":
-        current = services.database.get_setting(s.key) or "50"
+        current = services.database.get_setting(s.key) or "100"
     elif s.kind == "interval":
         raw_seconds = services.display.get_slideshow_interval()
         current = _format_interval_label(raw_seconds)
@@ -309,6 +318,17 @@ def _prompt_text_for_setting(services, idx: int, notice: str | None = None) -> s
                 "Wenn aktiv, wird der Bildwechsel genau zu dieser Zeit ausgelöst — unabhängig von der Anzeigedauer.",
                 "",
                 "Oder deaktiviere den täglichen Bildwechsel per Button.",
+            ]
+        )
+    elif s.kind == "integer":
+        lines.extend(
+            [
+                f"Aktueller Wert für {s.label}: {current}",
+                "",
+                "Wie viele der neuesten Bilder pro Bibliothek sollen in der Rotation bleiben?",
+                "Ältere Bilder bleiben gespeichert, werden aber nicht mehr automatisch angezeigt.",
+                "",
+                "Erlaubt sind Werte zwischen 1 und 1000.",
             ]
         )
     else:
@@ -625,15 +645,19 @@ async def _apply_setting_value(
                 idx,
                 notice="Ungültiger Wert. Bitte gib eine ganze Zahl ein, oder nutze /cancel.",
             )
-        if int_value < 5 or int_value > 500:
+        if int_value < 1 or int_value > 1000:
             return await _show_setting_prompt(
                 update,
                 context,
                 idx,
-                notice="Der Wert muss zwischen 5 und 500 liegen. Bitte erneut eingeben oder /cancel.",
+                notice="Der Wert muss zwischen 1 und 1000 liegen. Bitte erneut eingeben oder /cancel.",
             )
         services.database.set_setting(s.key, str(int_value))
-        return await _show_settings_menu(update, context, notice=f"{s.label} ist jetzt {int_value} Bilder.")
+        return await _show_settings_menu(
+            update,
+            context,
+            notice=f"{s.label} ist jetzt {int_value}. Ältere Bilder bleiben gespeichert.",
+        )
 
     if s.kind == "sleep_schedule":
         if text in ("keine", "kein", "no", "off", "deaktivieren", "deaktiviert"):

@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 from app.models import ImageRecord, MaintenanceJobRecord
 from app.orientation import ACTIVE_ORIENTATIONS, ORIENTATION_SHARED, orientation_pool
 
+DEFAULT_ROTATION_LIMIT = 100
+
 
 def utcnow_iso() -> str:
     from datetime import datetime, timezone
@@ -108,6 +110,13 @@ class Database:
             )
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_images_orientation ON images(orientation_bucket)"
+            )
+            self._connection.execute(
+                """
+                INSERT INTO settings(key, value) VALUES(?, ?)
+                ON CONFLICT(key) DO NOTHING
+                """,
+                ("rotation_limit", str(DEFAULT_ROTATION_LIMIT)),
             )
             self._connection.commit()
         logger.info("Database initialized at %s", self.db_path)
@@ -452,39 +461,41 @@ class Database:
             return self._row_to_image(row)
 
     _DISPLAYED_STATUSES = ("displayed", "displayed_with_warnings")
+    _ROTATION_ELIGIBLE_STATUSES = ("queued", "processing", "rendered", "displayed", "displayed_with_warnings")
+
+    def get_rotation_limit(self) -> int:
+        with self._lock:
+            return self._get_rotation_limit_locked()
+
+    def count_rotation_pool_images(self, active_orientation: str | None = None) -> int:
+        with self._lock:
+            return len(self._get_rotation_pool_rows_locked(active_orientation))
+
+    def count_hidden_rotation_images(self, active_orientation: str | None = None) -> int:
+        with self._lock:
+            total = self._count_rotation_eligible_images_locked(active_orientation)
+            active = len(self._get_rotation_pool_rows_locked(active_orientation))
+            return max(0, total - active)
+
+    def is_image_in_rotation_pool(self, image_id: str, active_orientation: str | None = None) -> bool:
+        with self._lock:
+            return any(
+                row["image_id"] == image_id
+                for row in self._get_rotation_pool_rows_locked(active_orientation)
+            )
 
     def get_adjacent_image(self, current_image_id: str, direction: str, active_orientation: str | None = None) -> ImageRecord | None:
         with self._lock:
-            current = self._connection.execute(
-                "SELECT created_at FROM images WHERE image_id = ?", (current_image_id,)
-            ).fetchone()
-            if current is None:
-                return None
-            current_created_at = current["created_at"]
-            orientation_args = self._orientation_args(active_orientation)
-            orientation_sql = self._orientation_filter_sql(active_orientation)
-
-            if direction == "next":
-                row = self._connection.execute(
-                    f"SELECT * FROM images WHERE created_at > ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC LIMIT 1",
-                    (current_created_at, *self._DISPLAYED_STATUSES, *orientation_args),
-                ).fetchone()
-                if row is None:
-                    row = self._connection.execute(
-                        f"SELECT * FROM images WHERE image_id != ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC LIMIT 1",
-                        (current_image_id, *self._DISPLAYED_STATUSES, *orientation_args),
-                    ).fetchone()
-            else:
-                row = self._connection.execute(
-                    f"SELECT * FROM images WHERE created_at < ? AND status IN (?, ?){orientation_sql} ORDER BY created_at DESC LIMIT 1",
-                    (current_created_at, *self._DISPLAYED_STATUSES, *orientation_args),
-                ).fetchone()
-                if row is None:
-                    row = self._connection.execute(
-                        f"SELECT * FROM images WHERE image_id != ? AND status IN (?, ?){orientation_sql} ORDER BY created_at DESC LIMIT 1",
-                        (current_image_id, *self._DISPLAYED_STATUSES, *orientation_args),
-                    ).fetchone()
-
+            pool_rows = [
+                row
+                for row in self._get_rotation_pool_rows_locked(active_orientation)
+                if row["status"] in self._DISPLAYED_STATUSES
+            ]
+            row = self._select_relative_row_locked(
+                current_image_id,
+                pool_rows,
+                direction=direction,
+            )
             if row is None:
                 return None
             return self._row_to_image(row)
@@ -492,67 +503,42 @@ class Database:
     def get_next_navigation_target(self, current_image_id: str, active_orientation: str | None = None) -> ImageRecord | None:
         """Return the manual /next target, prioritizing rendered queue items."""
         with self._lock:
-            orientation_args = self._orientation_args(active_orientation)
-            orientation_sql = self._orientation_filter_sql(active_orientation)
-
-            row = self._connection.execute(
-                f"SELECT * FROM images WHERE status = 'rendered'{orientation_sql} ORDER BY created_at ASC LIMIT 1",
-                orientation_args,
-            ).fetchone()
-            if row is not None:
-                return self._row_to_image(row)
-
-            current = self._connection.execute(
-                "SELECT created_at FROM images WHERE image_id = ?",
-                (current_image_id,),
-            ).fetchone()
-            if current is None:
-                return None
-            current_created_at = current["created_at"]
-
-            row = self._connection.execute(
-                f"SELECT * FROM images WHERE created_at > ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC LIMIT 1",
-                (current_created_at, *self._DISPLAYED_STATUSES, *orientation_args),
-            ).fetchone()
+            pool_rows = self._get_rotation_pool_rows_locked(active_orientation)
+            row = next((row for row in pool_rows if row["status"] == "rendered"), None)
             if row is None:
-                row = self._connection.execute(
-                    f"SELECT * FROM images WHERE image_id != ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC LIMIT 1",
-                    (current_image_id, *self._DISPLAYED_STATUSES, *orientation_args),
-                ).fetchone()
+                displayed_rows = [
+                    candidate
+                    for candidate in pool_rows
+                    if candidate["status"] in self._DISPLAYED_STATUSES
+                ]
+                row = self._select_relative_row_locked(
+                    current_image_id,
+                    displayed_rows,
+                    direction="next",
+                )
             if row is None:
                 return None
             return self._row_to_image(row)
 
     def count_displayed_images(self, active_orientation: str | None = None) -> int:
         with self._lock:
-            orientation_args = self._orientation_args(active_orientation)
-            row = self._connection.execute(
-                f"SELECT COUNT(*) AS count FROM images WHERE status IN (?, ?){self._orientation_filter_sql(active_orientation)}",
-                (*self._DISPLAYED_STATUSES, *orientation_args),
-            ).fetchone()
-            return int(row["count"] if row else 0)
+            return sum(
+                1
+                for row in self._get_rotation_pool_rows_locked(active_orientation)
+                if row["status"] in self._DISPLAYED_STATUSES
+            )
 
     def get_displayed_image_position(self, image_id: str, active_orientation: str | None = None) -> int:
         with self._lock:
-            current = self._connection.execute(
-                "SELECT created_at, orientation_bucket FROM images WHERE image_id = ?",
-                (image_id,),
-            ).fetchone()
-            if current is None:
-                return 0
-            if active_orientation in ACTIVE_ORIENTATIONS and current["orientation_bucket"] not in orientation_pool(active_orientation):
-                return 0
-            orientation_args = self._orientation_args(active_orientation)
-            row = self._connection.execute(
-                f"""
-                SELECT COUNT(*) AS pos FROM images
-                WHERE created_at <= ?
-                AND status IN (?, ?)
-                {self._orientation_filter_sql(active_orientation)}
-                """,
-                (current["created_at"], *self._DISPLAYED_STATUSES, *orientation_args),
-            ).fetchone()
-            return int(row["pos"] if row else 0)
+            displayed_rows = [
+                row
+                for row in self._get_rotation_pool_rows_locked(active_orientation)
+                if row["status"] in self._DISPLAYED_STATUSES
+            ]
+            for index, row in enumerate(displayed_rows, start=1):
+                if row["image_id"] == image_id:
+                    return index
+            return 0
 
     def _row_to_image(self, row: sqlite3.Row) -> ImageRecord:
         return ImageRecord(
@@ -735,11 +721,14 @@ class Database:
     def get_oldest_rendered_image_for_orientation(self, active_orientation: str | None = None) -> ImageRecord | None:
         """Return the oldest rendered image visible in the active orientation pool."""
         with self._lock:
-            orientation_args = self._orientation_args(active_orientation)
-            row = self._connection.execute(
-                f"SELECT * FROM images WHERE status = 'rendered'{self._orientation_filter_sql(active_orientation)} ORDER BY created_at ASC LIMIT 1",
-                orientation_args,
-            ).fetchone()
+            row = next(
+                (
+                    candidate
+                    for candidate in self._get_rotation_pool_rows_locked(active_orientation)
+                    if candidate["status"] == "rendered"
+                ),
+                None,
+            )
             if row is None:
                 return None
             return self._row_to_image(row)
@@ -747,12 +736,11 @@ class Database:
     def count_rendered_images(self, active_orientation: str | None = None) -> int:
         """Count images with status 'rendered' (queued for display after cooldown)."""
         with self._lock:
-            orientation_args = self._orientation_args(active_orientation)
-            row = self._connection.execute(
-                f"SELECT COUNT(*) AS count FROM images WHERE status = 'rendered'{self._orientation_filter_sql(active_orientation)}",
-                orientation_args,
-            ).fetchone()
-            return int(row["count"] if row else 0)
+            return sum(
+                1
+                for row in self._get_rotation_pool_rows_locked(active_orientation)
+                if row["status"] == "rendered"
+            )
 
     def get_next_images(self, current_image_id: str, n: int, active_orientation: str | None = None) -> list[ImageRecord]:
         """Get the next N displayed images after current_image_id, wrapping around."""
@@ -762,25 +750,33 @@ class Database:
             ).fetchone()
             if current is None:
                 return []
-            current_created_at = current["created_at"]
-            orientation_args = self._orientation_args(active_orientation)
-            orientation_sql = self._orientation_filter_sql(active_orientation)
+            displayed_rows = [
+                row
+                for row in self._get_rotation_pool_rows_locked(active_orientation)
+                if row["status"] in self._DISPLAYED_STATUSES
+            ]
+            if not displayed_rows:
+                return []
 
-            rows = self._connection.execute(
-                f"SELECT * FROM images WHERE created_at > ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC LIMIT ?",
-                (current_created_at, *self._DISPLAYED_STATUSES, *orientation_args, n),
-            ).fetchall()
-            results = [self._row_to_image(r) for r in rows]
-
-            if len(results) < n:
-                remaining = n - len(results)
-                wrap_rows = self._connection.execute(
-                    f"SELECT * FROM images WHERE created_at <= ? AND image_id != ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC LIMIT ?",
-                    (current_created_at, current_image_id, *self._DISPLAYED_STATUSES, *orientation_args, remaining),
-                ).fetchall()
-                results.extend(self._row_to_image(r) for r in wrap_rows)
-
-            return results
+            current_index = next(
+                (index for index, row in enumerate(displayed_rows) if row["image_id"] == current_image_id),
+                None,
+            )
+            if current_index is not None:
+                if len(displayed_rows) == 1:
+                    return []
+                ordered = displayed_rows[current_index + 1:] + displayed_rows[:current_index]
+            else:
+                start_index = self._get_rotation_start_index_locked(
+                    displayed_rows,
+                    current_image_id,
+                    current["created_at"],
+                    include_current=False,
+                )
+                if start_index is None:
+                    return []
+                ordered = displayed_rows[start_index:] + displayed_rows[:start_index]
+            return [self._row_to_image(row) for row in ordered[:n]]
 
     def get_all_displayed_images_ordered(self, current_image_id: str, active_orientation: str | None = None) -> list[ImageRecord]:
         """Return all displayed images in slideshow order, starting from current_image_id.
@@ -794,38 +790,36 @@ class Database:
             ).fetchone()
             if current is None:
                 return []
-            current_created_at = current["created_at"]
-            orientation_args = self._orientation_args(active_orientation)
-            orientation_sql = self._orientation_filter_sql(active_orientation)
+            displayed_rows = [
+                row
+                for row in self._get_rotation_pool_rows_locked(active_orientation)
+                if row["status"] in self._DISPLAYED_STATUSES
+            ]
+            if not displayed_rows:
+                return []
 
-            # Current + everything after it
-            rows_after = self._connection.execute(
-                f"SELECT * FROM images WHERE created_at >= ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC",
-                (current_created_at, *self._DISPLAYED_STATUSES, *orientation_args),
-            ).fetchall()
-            # Everything before it (wrap around)
-            rows_before = self._connection.execute(
-                f"SELECT * FROM images WHERE created_at < ? AND status IN (?, ?){orientation_sql} ORDER BY created_at ASC",
-                (current_created_at, *self._DISPLAYED_STATUSES, *orientation_args),
-            ).fetchall()
+            start_index = self._get_rotation_start_index_locked(
+                displayed_rows,
+                current_image_id,
+                current["created_at"],
+                include_current=True,
+            )
+            if start_index is None:
+                return []
 
-            results = [self._row_to_image(r) for r in rows_after]
-            results.extend(self._row_to_image(r) for r in rows_before)
-            return results
+            ordered = displayed_rows[start_index:] + displayed_rows[:start_index]
+            return [self._row_to_image(row) for row in ordered]
 
     def get_newest_eligible_orientation_image(self, active_orientation: str) -> ImageRecord | None:
         with self._lock:
-            orientation_args = self._orientation_args(active_orientation)
-            row = self._connection.execute(
-                f"""
-                SELECT * FROM images
-                WHERE status IN (?, ?, ?)
-                {self._orientation_filter_sql(active_orientation)}
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                ("rendered", *self._DISPLAYED_STATUSES, *orientation_args),
-            ).fetchone()
+            row = next(
+                (
+                    candidate
+                    for candidate in reversed(self._get_rotation_pool_rows_locked(active_orientation))
+                    if candidate["status"] in ("rendered", *self._DISPLAYED_STATUSES)
+                ),
+                None,
+            )
             if row is None:
                 return None
             return self._row_to_image(row)
@@ -895,6 +889,108 @@ class Database:
         if active_orientation not in ACTIVE_ORIENTATIONS:
             return ""
         return " AND orientation_bucket IN (?, ?)"
+
+    def _get_rotation_limit_locked(self) -> int:
+        row = self._connection.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            ("rotation_limit",),
+        ).fetchone()
+        raw_value = row["value"] if row else str(DEFAULT_ROTATION_LIMIT)
+        try:
+            return max(1, int(str(raw_value)))
+        except (TypeError, ValueError):
+            return DEFAULT_ROTATION_LIMIT
+
+    def _count_rotation_eligible_images_locked(self, active_orientation: str | None) -> int:
+        orientation_args = self._orientation_args(active_orientation)
+        placeholders = ", ".join("?" for _ in self._ROTATION_ELIGIBLE_STATUSES)
+        row = self._connection.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM images
+            WHERE status IN ({placeholders})
+            {self._orientation_filter_sql(active_orientation)}
+            """,
+            (*self._ROTATION_ELIGIBLE_STATUSES, *orientation_args),
+        ).fetchone()
+        return int(row["count"] if row else 0)
+
+    def _get_rotation_pool_rows_locked(self, active_orientation: str | None) -> list[sqlite3.Row]:
+        orientation_args = self._orientation_args(active_orientation)
+        placeholders = ", ".join("?" for _ in self._ROTATION_ELIGIBLE_STATUSES)
+        rows = self._connection.execute(
+            f"""
+            SELECT *
+            FROM images
+            WHERE status IN ({placeholders})
+            {self._orientation_filter_sql(active_orientation)}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (*self._ROTATION_ELIGIBLE_STATUSES, *orientation_args, self._get_rotation_limit_locked()),
+        ).fetchall()
+        return list(reversed(rows))
+
+    def _select_relative_row_locked(
+        self,
+        current_image_id: str,
+        rows: list[sqlite3.Row],
+        *,
+        direction: str,
+    ) -> sqlite3.Row | None:
+        current = self._connection.execute(
+            "SELECT created_at FROM images WHERE image_id = ?",
+            (current_image_id,),
+        ).fetchone()
+        if current is None or not rows:
+            return None
+
+        current_created_at = current["created_at"]
+        current_index = next(
+            (index for index, row in enumerate(rows) if row["image_id"] == current_image_id),
+            None,
+        )
+        if current_index is not None:
+            if len(rows) == 1:
+                return None
+            if direction == "next":
+                return rows[(current_index + 1) % len(rows)]
+            return rows[(current_index - 1) % len(rows)]
+
+        if direction == "next":
+            for row in rows:
+                if row["created_at"] > current_created_at:
+                    return row
+            return rows[0]
+
+        for row in reversed(rows):
+            if row["created_at"] < current_created_at:
+                return row
+        return rows[-1]
+
+    @staticmethod
+    def _get_rotation_start_index_locked(
+        rows: list[sqlite3.Row],
+        current_image_id: str,
+        current_created_at: str,
+        *,
+        include_current: bool,
+    ) -> int | None:
+        current_index = next(
+            (index for index, row in enumerate(rows) if row["image_id"] == current_image_id),
+            None,
+        )
+        if current_index is not None:
+            if include_current:
+                return current_index
+            if len(rows) == 1:
+                return None
+            return (current_index + 1) % len(rows)
+
+        for index, row in enumerate(rows):
+            if row["created_at"] > current_created_at:
+                return index
+        return 0
 
     def _upsert_image_locked(self, record: ImageRecord) -> None:
         self._connection.execute(

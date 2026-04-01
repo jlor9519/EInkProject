@@ -119,6 +119,20 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
             self.assert_future_timestamp(services.database.get_setting("slideshow_next_fire_at"))
             self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
 
+    async def test_auto_advance_ignores_images_hidden_by_rotation_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path, interval_seconds=7200)
+            services.database.set_setting("rotation_limit", "2")
+            _seed_displayed_images(tmpdir_path, services, ["img-1", "img-2", "img-3"])
+            context = _JobContext(services)
+
+            await _advance_slideshow(context)
+
+            self.assertEqual(services.display.display_calls[-1], "img-2")
+            payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-2")
+
     def assert_future_timestamp(self, raw: str | None) -> None:
         self.assertIsNotNone(raw)
         target = datetime.fromisoformat(raw)

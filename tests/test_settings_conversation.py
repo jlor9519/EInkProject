@@ -52,6 +52,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Ausrichtung: Hochformat", labels)
         self.assertIn("Bildanpassung: Zuschneiden", labels)
         self.assertIn("Täglicher Wechsel: Deaktiviert", labels)
+        self.assertIn("Bilder in Rotation: 100", labels)
         self.assertIn("Abbrechen", labels)
 
     async def test_settings_callback_opens_prompt_from_button(self) -> None:
@@ -216,6 +217,30 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(update.effective_message.replies), 1)
         self.assertIn("Ungültiger Wert", update.effective_message.replies[0])
         self.assertIsNone(services.display.last_updates)
+
+    async def test_rotation_limit_setting_can_be_saved(self) -> None:
+        services = _FakeServices(is_admin=True)
+        update = _FakeUpdate("250", user_id=11)
+        context = _FakeContext(services)
+        context.user_data[PENDING_SETTINGS_KEY] = 10
+
+        result = await receive_settings_value(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
+        self.assertEqual(services.database.get_setting("rotation_limit"), "250")
+        self.assertIn("Bilder in Rotation ist jetzt 250", update.effective_message.replies[0])
+
+    async def test_rotation_limit_setting_rejects_invalid_values(self) -> None:
+        services = _FakeServices(is_admin=True)
+        update = _FakeUpdate("0", user_id=11)
+        context = _FakeContext(services)
+        context.user_data[PENDING_SETTINGS_KEY] = 10
+
+        result = await receive_settings_value(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_VALUE)
+        self.assertEqual(context.user_data[PENDING_SETTINGS_KEY], 10)
+        self.assertIn("zwischen 1 und 1000", update.effective_message.replies[0])
 
     async def test_receive_settings_value_applies_orientation_and_inverted_image(self) -> None:
         services = _FakeServices(is_admin=True)

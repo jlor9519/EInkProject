@@ -612,6 +612,124 @@ class DatabaseTests(unittest.TestCase):
                 "vertical-rendered",
             )
 
+    def test_rotation_limit_uses_newest_images_and_restores_hidden_images_when_increased(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+            database.set_setting("rotation_limit", "2")
+            records = [
+                ImageRecord(
+                    image_id="shared-old",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=1,
+                    local_original_path="/tmp/shared-old.jpg",
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="shared",
+                ),
+                ImageRecord(
+                    image_id="vertical-mid",
+                    telegram_file_id="file-2",
+                    telegram_chat_id=1,
+                    local_original_path="/tmp/vertical-mid.jpg",
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:10:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="vertical",
+                ),
+                ImageRecord(
+                    image_id="vertical-newest",
+                    telegram_file_id="file-3",
+                    telegram_chat_id=1,
+                    local_original_path="/tmp/vertical-newest.jpg",
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:20:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="vertical",
+                ),
+                ImageRecord(
+                    image_id="vertical-rendered",
+                    telegram_file_id="file-4",
+                    telegram_chat_id=1,
+                    local_original_path="/tmp/vertical-rendered.jpg",
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:30:00+00:00",
+                    status="rendered",
+                    last_error=None,
+                    orientation_bucket="vertical",
+                ),
+                ImageRecord(
+                    image_id="horizontal-new",
+                    telegram_file_id="file-5",
+                    telegram_chat_id=1,
+                    local_original_path="/tmp/horizontal-new.jpg",
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:40:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                ),
+            ]
+            for record in records:
+                database.upsert_image(record)
+
+            self.assertEqual(database.get_rotation_limit(), 2)
+            self.assertEqual(database.count_rotation_pool_images("vertical"), 2)
+            self.assertEqual(database.count_hidden_rotation_images("vertical"), 2)
+            self.assertEqual(database.count_displayed_images("vertical"), 1)
+            self.assertEqual(database.count_rendered_images("vertical"), 1)
+            self.assertFalse(database.is_image_in_rotation_pool("shared-old", "vertical"))
+            self.assertTrue(database.is_image_in_rotation_pool("vertical-rendered", "vertical"))
+            self.assertEqual(
+                database.get_adjacent_image("shared-old", "next", "vertical").image_id,
+                "vertical-newest",
+            )
+            self.assertEqual(
+                [record.image_id for record in database.get_next_images("shared-old", 3, "vertical")],
+                ["vertical-newest"],
+            )
+            self.assertEqual(
+                [record.image_id for record in database.get_all_displayed_images_ordered("shared-old", "vertical")],
+                ["vertical-newest"],
+            )
+            self.assertEqual(database.count_rotation_pool_images("horizontal"), 2)
+            self.assertEqual(database.count_hidden_rotation_images("horizontal"), 0)
+
+            database.set_setting("rotation_limit", "4")
+
+            self.assertEqual(database.count_rotation_pool_images("vertical"), 4)
+            self.assertEqual(database.count_hidden_rotation_images("vertical"), 0)
+            self.assertTrue(database.is_image_in_rotation_pool("shared-old", "vertical"))
+            self.assertEqual(database.count_displayed_images("vertical"), 3)
+            self.assertEqual(
+                [record.image_id for record in database.get_all_displayed_images_ordered("shared-old", "vertical")],
+                ["shared-old", "vertical-mid", "vertical-newest"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
