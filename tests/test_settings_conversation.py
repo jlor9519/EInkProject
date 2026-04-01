@@ -267,6 +267,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.user_data[PENDING_IMAGE_TUNING_FIELD_KEY], "saturation")
         self.assertEqual(len(update.effective_message.replies), 1)
         self.assertIn("Ungültiger Wert", update.effective_message.replies[0])
+        self.assertNotIn("/cancel", update.effective_message.replies[0])
         self.assertIsNone(services.display.last_updates)
 
     async def test_image_tuning_save_applies_multiple_values_in_one_call(self) -> None:
@@ -371,6 +372,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, WAITING_FOR_SETTINGS_VALUE)
         self.assertEqual(context.user_data[PENDING_SETTINGS_KEY], 7)
         self.assertIn("zwischen 1 und 1000", update.effective_message.replies[0])
+        self.assertNotIn("/cancel", update.effective_message.replies[0])
 
     async def test_receive_settings_value_applies_orientation_and_inverted_image(self) -> None:
         services = _FakeServices(is_admin=True)

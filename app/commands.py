@@ -8,7 +8,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes, ConversationHandler
+from telegram.ext import ContextTypes
 
 from app.auth import require_admin, require_whitelist
 from app.display_state import (
@@ -105,7 +105,6 @@ def _build_help_text(is_admin: bool) -> str:
         "/delete - ausgewähltes Bild löschen",
         "/status - Systemstatus anzeigen",
         "/myid - deine Telegram-Nutzer-ID anzeigen",
-        "/cancel - den laufenden Upload abbrechen",
     ]
     if is_admin:
         lines.extend(
@@ -113,8 +112,6 @@ def _build_help_text(is_admin: bool) -> str:
                 "/settings - Anzeigeeinstellungen anzeigen/ändern",
                 "/users - freigegebene Nutzer anzeigen",
                 "/unwhitelist - Nutzer entfernen",
-                "/restart - Raspberry Pi neu starten",
-                "/update - Projekt aktualisieren",
             ]
         )
     return "\n".join(lines)
@@ -386,23 +383,6 @@ async def whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     services.auth.whitelist_user(target_user_id)
     logger.info("User %d whitelisted by admin %d", target_user_id, update.effective_user.id)
     await update.effective_message.reply_text(f"Nutzer {target_user_id} wurde freigegeben.")
-
-
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    if user is None or update.effective_message is None:
-        return ConversationHandler.END
-
-    pending = context.user_data.get("pending_submission")
-    if isinstance(pending, dict):
-        original_path = pending.get("original_path")
-        if original_path:
-            safe_unlink(original_path, logger=logger)
-
-    context.user_data.pop("pending_submission", None)
-    await update.effective_message.reply_text("Der aktuelle Upload wurde abgebrochen.")
-    return ConversationHandler.END
-
 
 
 @require_whitelist

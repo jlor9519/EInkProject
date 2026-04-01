@@ -773,7 +773,11 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Löschen", labels)
         self.assertIn("Einstellungen", labels)
         self.assertIn("Abbrechen", labels)
-        self.assertIn("/settings - Anzeigeeinstellungen anzeigen/ändern", update.effective_message.replies[0])
+        reply = update.effective_message.replies[0]
+        self.assertIn("/settings - Anzeigeeinstellungen anzeigen/ändern", reply)
+        self.assertNotIn("/cancel", reply)
+        self.assertNotIn("/restart", reply)
+        self.assertNotIn("/update", reply)
 
     async def test_status_command_adds_admin_quick_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

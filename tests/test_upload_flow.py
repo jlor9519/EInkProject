@@ -19,6 +19,7 @@ from app.conversations import (
     photo_button_callback,
     photo_entry,
     process_queued_upload,
+    receive_text_choice,
 )
 from app.database import Database
 from app.models import DisplayResult, ImageRecord
@@ -81,6 +82,23 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
 
             record = services.database.get_image_by_id("img-1")
             self.assertEqual(record.orientation_bucket, "vertical")
+
+    async def test_invalid_text_choice_points_to_abort_button_not_cancel_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            application = _FakeApplication(services)
+            update = _FakeUpdate(user_id=1, chat_id=101, photo_token="one")
+            context = _FakeContext(application)
+
+            await photo_entry(update, context)
+            update.effective_message.text = "vielleicht"
+
+            result = await receive_text_choice(update, context)
+
+            self.assertEqual(result, WAITING_FOR_TEXT_CHOICE)
+            self.assertIn("Bitte antworte mit Ja/J oder Nein/N", update.effective_message.replies[-1])
+            self.assertNotIn("/cancel", update.effective_message.replies[-1])
 
     async def test_photo_date_today_uses_local_date_helper(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

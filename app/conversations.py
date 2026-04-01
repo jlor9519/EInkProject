@@ -13,7 +13,6 @@ from telegram.error import TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
-    CommandHandler,
     ContextTypes,
     ConversationHandler,
     MessageHandler,
@@ -102,7 +101,7 @@ async def photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return ConversationHandler.END
 
     if context.user_data.get(PENDING_SUBMISSION_KEY):
-        await message.reply_text("Du hast bereits einen Upload in Bearbeitung. Beantworte die Fragen oder nutze /cancel.")
+        await message.reply_text("Du hast bereits einen Upload in Bearbeitung. Beantworte die Fragen oder nutze den Button „Abbrechen“.")
         return WAITING_FOR_TEXT_CHOICE
 
     photo = message.photo[-1]
@@ -153,7 +152,7 @@ async def receive_text_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
         return WAITING_FOR_LOCATION
     if text in ("nein", "n"):
         return await _submit_photo(update, context, show_caption=False)
-    await update.effective_message.reply_text("Bitte antworte mit Ja/J oder Nein/N, oder nutze /cancel.")
+    await update.effective_message.reply_text("Bitte antworte mit Ja/J oder Nein/N, oder nutze den Button „Abbrechen“.")
     return WAITING_FOR_TEXT_CHOICE
 
 
@@ -707,7 +706,7 @@ def _build_success_reply(record: ImageRecord, warnings: list[str]) -> str:
 def _make_unexpected_handler(state: int):
     async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         if update.effective_message is not None:
-            await update.effective_message.reply_text("Bitte beantworte die aktuelle Frage oder nutze /cancel.")
+            await update.effective_message.reply_text("Bitte beantworte die aktuelle Frage oder nutze den Button „Abbrechen“.")
         return state
 
     return handler
@@ -762,15 +761,8 @@ def build_photo_conversation() -> ConversationHandler:
                 MessageHandler(filters.ALL, _conversation_timeout),
             ],
         },
-        fallbacks=[CommandHandler("cancel", unexpected_cancel)],
         allow_reentry=False,
         name="photo_upload",
         persistent=False,
         conversation_timeout=300,
     )
-
-
-async def unexpected_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    from app.commands import cancel_command
-
-    return await cancel_command(update, context)

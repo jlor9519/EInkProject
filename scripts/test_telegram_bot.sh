@@ -106,7 +106,6 @@ Useful commands to try in Telegram:
 - /help
 - /status
 - /whitelist <user_id>
-- /cancel
 
 You can also send a photo and walk through the full metadata flow.
 Display refresh is mocked with: echo telegram-test-refresh

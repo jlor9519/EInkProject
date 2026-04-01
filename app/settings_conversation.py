@@ -705,12 +705,12 @@ async def receive_settings_choice(update: Update, context: ContextTypes.DEFAULT_
         choice = int(text)
     except ValueError:
         await update.effective_message.reply_text(
-            f"Bitte antworte mit einer Zahl zwischen 1 und {len(_SETTINGS)}, oder nutze /cancel."
+            f"Bitte antworte mit einer Zahl zwischen 1 und {len(_SETTINGS)}, oder nutze den Button „Abbrechen“."
         )
         return WAITING_FOR_SETTINGS_CHOICE
     if choice < 1 or choice > len(_SETTINGS):
         await update.effective_message.reply_text(
-            f"Ungültige Auswahl. Bitte wähle eine Zahl zwischen 1 und {len(_SETTINGS)}, oder nutze /cancel."
+            f"Ungültige Auswahl. Bitte wähle eine Zahl zwischen 1 und {len(_SETTINGS)}, oder nutze den Button „Abbrechen“."
         )
         return WAITING_FOR_SETTINGS_CHOICE
 
@@ -746,14 +746,14 @@ async def _apply_image_tuning_value(
             update,
             context,
             field_key,
-            notice="Ungültiger Wert. Bitte gib eine Zahl ein (z.B. 1.0), oder nutze /cancel.",
+            notice="Ungültiger Wert. Bitte gib eine Zahl ein (z.B. 1.0), oder nutze den Button „Abbrechen“.",
         )
     if value < 0.1 or value > 3.0:
         return await _show_image_tuning_prompt(
             update,
             context,
             field_key,
-            notice="Der Wert muss zwischen 0.1 und 3.0 liegen. Bitte erneut eingeben oder /cancel.",
+            notice="Der Wert muss zwischen 0.1 und 3.0 liegen. Bitte erneut eingeben oder den Button „Abbrechen“ nutzen.",
         )
 
     services = get_services(context)
@@ -823,14 +823,14 @@ async def _apply_setting_value(
                 update,
                 context,
                 idx,
-                notice="Ungültiges Format. Beispiele: 30m, 1h, 2h, 0 — oder nutze /cancel.",
+                notice="Ungültiges Format. Beispiele: 30m, 1h, 2h, 0 — oder nutze den Button „Abbrechen“.",
             )
         if seconds < 0 or seconds > 86400:
             return await _show_setting_prompt(
                 update,
                 context,
                 idx,
-                notice="Der Wert muss zwischen 0 und 24 Stunden liegen. Bitte erneut eingeben oder /cancel.",
+                notice="Der Wert muss zwischen 0 und 24 Stunden liegen. Bitte erneut eingeben oder den Button „Abbrechen“ nutzen.",
             )
         services.database.set_setting("new_image_cooldown", str(seconds))
         label = "Deaktiviert" if seconds == 0 else _format_interval_label(seconds)
@@ -843,7 +843,7 @@ async def _apply_setting_value(
                 update,
                 context,
                 idx,
-                notice="Ungültiger Wert. Bitte gib Hochformat oder Querformat ein, oder nutze /cancel.",
+                notice="Ungültiger Wert. Bitte gib Hochformat oder Querformat ein, oder nutze den Button „Abbrechen“.",
             )
         updates = {
             "orientation": orientation,
@@ -880,7 +880,7 @@ async def _apply_setting_value(
                 update,
                 context,
                 idx,
-                notice="Ungültiger Wert. Bitte gib Zuschneiden oder Einpassen ein, oder nutze /cancel.",
+                notice="Ungültiger Wert. Bitte gib Zuschneiden oder Einpassen ein, oder nutze den Button „Abbrechen“.",
             )
         services.database.set_setting("image_fit_mode", fit_mode)
         label = _FIT_MODE_LABELS.get(fit_mode, fit_mode)
@@ -901,14 +901,14 @@ async def _apply_setting_value(
                 update,
                 context,
                 idx,
-                notice="Ungültiger Wert. Bitte gib eine ganze Zahl ein, oder nutze /cancel.",
+                notice="Ungültiger Wert. Bitte gib eine ganze Zahl ein, oder nutze den Button „Abbrechen“.",
             )
         if int_value < 1 or int_value > 1000:
             return await _show_setting_prompt(
                 update,
                 context,
                 idx,
-                notice="Der Wert muss zwischen 1 und 1000 liegen. Bitte erneut eingeben oder /cancel.",
+                notice="Der Wert muss zwischen 1 und 1000 liegen. Bitte erneut eingeben oder den Button „Abbrechen“ nutzen.",
             )
         services.database.set_setting(s.key, str(int_value))
         return await _show_settings_menu(
@@ -935,7 +935,7 @@ async def _apply_setting_value(
                 update,
                 context,
                 idx,
-                notice="Ungültiges Format. Bitte im Format HH:MM-HH:MM eingeben (z.B. 22:00-08:00), oder /cancel.",
+                notice="Ungültiges Format. Bitte im Format HH:MM-HH:MM eingeben (z.B. 22:00-08:00), oder den Button „Abbrechen“ nutzen.",
             )
         sleep_start = _parse_time_string(parts[0])
         wake_up = _parse_time_string(parts[1])
@@ -944,14 +944,14 @@ async def _apply_setting_value(
                 update,
                 context,
                 idx,
-                notice="Ungültige Uhrzeit. Bitte im Format HH:MM-HH:MM eingeben (z.B. 22:00-08:00), oder /cancel.",
+                notice="Ungültige Uhrzeit. Bitte im Format HH:MM-HH:MM eingeben (z.B. 22:00-08:00), oder den Button „Abbrechen“ nutzen.",
             )
         if sleep_start == wake_up:
             return await _show_setting_prompt(
                 update,
                 context,
                 idx,
-                notice="Schlaf- und Aufwachzeit dürfen nicht gleich sein. Bitte erneut eingeben oder /cancel.",
+                notice="Schlaf- und Aufwachzeit dürfen nicht gleich sein. Bitte erneut eingeben oder den Button „Abbrechen“ nutzen.",
             )
         try:
             result = services.display.set_sleep_schedule(sleep_start, wake_up)
@@ -972,14 +972,14 @@ async def _apply_setting_value(
                 update,
                 context,
                 idx,
-                notice="Ungültiges Format. Beispiele: 30m, 1h, 2h, 1d — oder nutze /cancel.",
+                notice="Ungültiges Format. Beispiele: 30m, 1h, 2h, 1d — oder nutze den Button „Abbrechen“.",
             )
         if seconds < _INTERVAL_MIN or seconds > _INTERVAL_MAX:
             return await _show_setting_prompt(
                 update,
                 context,
                 idx,
-                notice="Der Wert muss zwischen 5 Minuten und 7 Tagen liegen. Bitte erneut eingeben oder /cancel.",
+                notice="Der Wert muss zwischen 5 Minuten und 7 Tagen liegen. Bitte erneut eingeben oder den Button „Abbrechen“ nutzen.",
             )
         try:
             result = services.display.set_slideshow_interval(seconds)
@@ -1017,7 +1017,7 @@ async def _apply_setting_value(
                 update,
                 context,
                 idx,
-                notice="Ungültige Uhrzeit. Bitte im Format HH:MM eingeben (z.B. 08:00, 8:30), oder /cancel.",
+                notice="Ungültige Uhrzeit. Bitte im Format HH:MM eingeben (z.B. 08:00, 8:30), oder den Button „Abbrechen“ nutzen.",
             )
         services.database.set_setting("scheduled_change_time", time_str)
         from app.slideshow import reschedule_slideshow_job
@@ -1039,9 +1039,9 @@ async def _settings_unexpected(update: Update, context: ContextTypes.DEFAULT_TYP
     state = context.user_data.get(PENDING_SETTINGS_KEY) or context.user_data.get(PENDING_IMAGE_TUNING_FIELD_KEY)
     if update.effective_message is not None:
         if state is None:
-            await update.effective_message.reply_text("Bitte nutze die Buttons im Einstellungs-Menü oder /cancel.")
+            await update.effective_message.reply_text("Bitte nutze die Buttons im Einstellungs-Menü oder den Button „Abbrechen“.")
         else:
-            await update.effective_message.reply_text("Bitte beantworte die aktuelle Frage, nutze die Buttons oder /cancel.")
+            await update.effective_message.reply_text("Bitte beantworte die aktuelle Frage, nutze die Buttons oder den Button „Abbrechen“.")
     return WAITING_FOR_SETTINGS_VALUE if state is not None else WAITING_FOR_SETTINGS_CHOICE
 
 
@@ -1052,14 +1052,6 @@ async def _settings_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.effective_message.reply_text(
             "Einstellungs-Sitzung nach 2 Minuten Inaktivität beendet. Nutze /settings um neu zu starten."
         )
-    return ConversationHandler.END
-
-
-async def settings_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data.pop(PENDING_SETTINGS_KEY, None)
-    _clear_image_tuning_state(context)
-    if update.effective_message is not None:
-        await update.effective_message.reply_text("Einstellungs-Menü geschlossen.")
     return ConversationHandler.END
 
 
@@ -1084,7 +1076,6 @@ def build_settings_conversation() -> ConversationHandler:
                 MessageHandler(filters.ALL, _settings_timeout),
             ],
         },
-        fallbacks=[CommandHandler("cancel", settings_cancel)],
         allow_reentry=True,
         name="settings",
         persistent=False,

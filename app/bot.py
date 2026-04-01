@@ -12,7 +12,6 @@ from app.commands import (
     _delete_confirm_callback,
     _delete_page_callback,
     _delete_select_callback,
-    cancel_command,
     command_action_callback,
     delete_command,
     help_command,
@@ -29,14 +28,6 @@ from app.commands import (
 )
 from app.conversations import build_photo_conversation, process_queued_upload
 from app.display_state import DISPLAY_TRANSITION_KEYS, read_current_payload_image_id
-from app.maintenance import (
-    MAINTENANCE_LOCK_KEY,
-    maintenance_cancel_callback,
-    maintenance_confirm_callback,
-    notify_maintenance_updates,
-    restart_command,
-    update_command,
-)
 from app.settings_conversation import build_settings_conversation
 from app.models import AppServices
 
@@ -63,7 +54,6 @@ async def _post_init(application: Application) -> None:
         await queue.put(record.image_id)
     if pending:
         logger.info("Re-enqueued %d pending upload(s) on startup", len(pending))
-    await notify_maintenance_updates(application)
 
 
 async def _post_shutdown(application: Application) -> None:
@@ -95,7 +85,6 @@ def build_application(services: AppServices) -> Application:
     application = ApplicationBuilder().token(services.config.telegram.bot_token).build()
     application.bot_data["services"] = services
     application.bot_data["display_lock"] = asyncio.Lock()
-    application.bot_data[MAINTENANCE_LOCK_KEY] = asyncio.Lock()
     application.bot_data[UPLOAD_QUEUE_KEY] = asyncio.Queue()
     application.post_init = _post_init
     application.post_shutdown = _post_shutdown
@@ -117,12 +106,7 @@ def build_application(services: AppServices) -> Application:
     application.add_handler(CallbackQueryHandler(_delete_cancel_callback, pattern=r"^del\|c$"))
     application.add_handler(CallbackQueryHandler(command_action_callback, pattern=r"^cmd\|"))
     application.add_handler(CommandHandler("refresh", refresh_command))
-    application.add_handler(CommandHandler("restart", restart_command))
-    application.add_handler(CommandHandler("update", update_command))
-    application.add_handler(CallbackQueryHandler(maintenance_confirm_callback, pattern=r"^maintenance_confirm:"))
-    application.add_handler(CallbackQueryHandler(maintenance_cancel_callback, pattern=r"^maintenance_cancel:"))
     application.add_handler(CommandHandler("users", users_command))
     application.add_handler(CommandHandler("unwhitelist", unwhitelist_command))
-    application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, stray_text_handler))
     return application
