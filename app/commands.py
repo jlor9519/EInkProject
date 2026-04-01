@@ -244,23 +244,25 @@ async def _render_list_text(services: AppServices) -> str:
 
     interval = await asyncio.to_thread(services.display.get_slideshow_interval)
 
-    from datetime import datetime, timezone as tz
+    from datetime import datetime, timedelta, timezone as tz
     from app.slideshow import (
-        _seconds_until_scheduled_occurrence,
         _set_next_fire_decision,
         compute_next_fire_decision,
         get_stored_next_fire_metadata,
+        project_display_change_offsets,
     )
     from app.settings_conversation import _format_interval_label
 
     now = datetime.now(tz.utc)
     next_fire_raw = services.database.get_setting("slideshow_next_fire_at")
     remaining = 0
+    next_fire_at: datetime | None = None
     if next_fire_raw:
         try:
             next_fire = datetime.fromisoformat(next_fire_raw)
             if next_fire.tzinfo is None:
                 next_fire = next_fire.replace(tzinfo=tz.utc)
+            next_fire_at = next_fire
             remaining = max(0, int((next_fire - now).total_seconds()))
         except (ValueError, TypeError):
             remaining = 0
@@ -270,6 +272,7 @@ async def _render_list_text(services: AppServices) -> str:
         remaining = decision.seconds
         stored_mode, stored_detail = decision.mode, decision.detail
         _set_next_fire_decision(services, decision)
+        next_fire_at = now + timedelta(seconds=remaining)
     elif stored_mode is None:
         decision = compute_next_fire_decision(services, active_orientation)
         stored_mode, stored_detail = decision.mode, decision.detail
@@ -292,12 +295,16 @@ async def _render_list_text(services: AppServices) -> str:
     if next_images:
         lines.append("")
         lines.append("Nächste Bilder:")
-        scheduled_mode_for_list = stored_mode == "scheduled_daily" and bool(stored_detail) and rendered_count == 0
+        projected_offsets = (
+            project_display_change_offsets(services, len(next_images), first_fire_at=next_fire_at)
+            if rendered_count == 0
+            else []
+        )
         for i, record in enumerate(next_images, 1):
             pos = ((current_pos or 0) + i - 1) % total + 1
             lines.append(f"{i}. [{pos}/{total}] {_image_label(record)}")
-            if scheduled_mode_for_list:
-                offset = _seconds_until_scheduled_occurrence(stored_detail, i - 1)
+            if projected_offsets:
+                offset = projected_offsets[i - 1]
             else:
                 offset = remaining + (i - 1) * interval
             eta_str = _format_interval_label(offset) if offset > 0 else "weniger als 1 Minute"

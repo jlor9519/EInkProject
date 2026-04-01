@@ -101,9 +101,13 @@ def seed_device_defaults(device_config_path: str | Path) -> None:
     for key, value in DEVICE_DEFAULTS.items():
         if key == "image_settings":
             existing = data.setdefault("image_settings", {})
-            existing.update(value)
+            if not isinstance(existing, dict):
+                existing = {}
+                data["image_settings"] = existing
+            for nested_key, nested_value in value.items():
+                existing.setdefault(nested_key, nested_value)
         else:
-            data[key] = value
+            data.setdefault(key, value)
     _write_json(device_path, data)
 
 

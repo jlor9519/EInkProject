@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -500,6 +501,56 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             await list_command(update, context)
 
             self.assertIn("Modus: Ruhezeit bis 23:59", update.effective_message.replies[0])
+
+    async def test_list_future_etas_skip_upcoming_quiet_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.display.interval_seconds = 3600
+            now_local = datetime.now(timezone.utc).astimezone()
+            sleep_start = now_local + timedelta(hours=2)
+            wake_up = sleep_start + timedelta(hours=8)
+            services.display.sleep_schedule = (
+                sleep_start.strftime("%H:%M"),
+                wake_up.strftime("%H:%M"),
+            )
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-1"}),
+                encoding="utf-8",
+            )
+            for index, image_id in enumerate(("img-1", "img-2", "img-3", "img-4")):
+                services.database.upsert_image(
+                    ImageRecord(
+                        image_id=image_id,
+                        telegram_file_id=f"file-{image_id}",
+                        telegram_chat_id=111,
+                        local_original_path=str(tmpdir_path / "incoming" / f"{image_id}.jpg"),
+                        local_rendered_path=None,
+                        location="",
+                        taken_at="",
+                        caption=image_id,
+                        uploaded_by=1,
+                        created_at=f"2026-03-18T12:{index:02d}:00+00:00",
+                        status="displayed",
+                        last_error=None,
+                        orientation_bucket="horizontal",
+                    )
+                )
+            services.database.set_setting(
+                "slideshow_next_fire_at",
+                (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            )
+            services.database.set_setting("slideshow_next_fire_mode", "interval")
+            services.database.set_setting("slideshow_next_fire_detail", "3600")
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await list_command(update, context)
+
+            reply = update.effective_message.replies[0]
+            self.assertIn("Nächste Bilder:", reply)
+            self.assertNotIn("In ca. 3 Std.", reply)
 
     async def test_next_promotes_oldest_rendered_image_before_displayed_rotation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

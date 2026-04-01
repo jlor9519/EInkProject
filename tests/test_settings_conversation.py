@@ -52,6 +52,16 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Täglicher Wechsel: Deaktiviert", labels)
         self.assertIn("Bilder in Rotation: 100", labels)
         self.assertIn("Abbrechen", labels)
+        self.assertEqual(
+            [[button.text for button in row] for row in markup.inline_keyboard],
+            [
+                ["Bildoptimierung", "Ausrichtung: Hochformat"],
+                ["Bildanpassung: Zuschneiden", "Anzeigedauer: 1 Tag"],
+                ["Ruhezeit: Keine", "Neue Bilder: 1 Stunde"],
+                ["Täglicher Wechsel: Deaktiviert", "Bilder in Rotation: 100"],
+                ["Abbrechen"],
+            ],
+        )
 
     async def test_settings_callback_opens_prompt_from_button(self) -> None:
         services = _FakeServices(is_admin=True)
@@ -86,6 +96,17 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Speichern", labels)
         self.assertIn("Zurück", labels)
         self.assertIn("Abbrechen", labels)
+        self.assertEqual(
+            [[button.text for button in row] for row in update.callback_query.text_edit_markups[0].inline_keyboard],
+            [
+                ["Sättigung: 1.4"],
+                ["Kontrast: 1.4"],
+                ["Schärfe: 1.2"],
+                ["Helligkeit: 1.1"],
+                ["Speichern"],
+                ["Zurück", "Abbrechen"],
+            ],
+        )
 
     async def test_settings_callback_back_returns_to_menu(self) -> None:
         services = _FakeServices(is_admin=True)

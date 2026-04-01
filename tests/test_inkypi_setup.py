@@ -11,6 +11,7 @@ from pathlib import Path
 from app.inkypi_setup import (
     DEFAULT_PLUGIN_INSTANCE_NAME,
     seed_dashboard_plugin_instance,
+    seed_device_defaults,
     verify_plugin_module_import,
     verify_seeded_plugin_instance,
 )
@@ -96,6 +97,63 @@ class InkyPiSetupTests(unittest.TestCase):
             self.assertFalse(result.applied)
             data = json.loads(device_path.read_text(encoding="utf-8"))
             self.assertEqual(data, original)
+
+    def test_seed_device_defaults_preserves_existing_orientation_and_image_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            device_path = Path(tmpdir) / "device.json"
+            device_path.write_text(
+                json.dumps(
+                    {
+                        "orientation": "horizontal",
+                        "timezone": "America/New_York",
+                        "image_settings": {
+                            "saturation": 1.9,
+                            "contrast": 1.1,
+                            "sharpness": 1.7,
+                            "brightness": 0.8,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            seed_device_defaults(device_path)
+
+            data = json.loads(device_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["orientation"], "horizontal")
+            self.assertEqual(data["timezone"], "America/New_York")
+            self.assertEqual(
+                data["image_settings"],
+                {
+                    "saturation": 1.9,
+                    "contrast": 1.1,
+                    "sharpness": 1.7,
+                    "brightness": 0.8,
+                },
+            )
+            self.assertTrue(data["inverted_image"])
+
+    def test_seed_device_defaults_only_fills_missing_nested_image_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            device_path = Path(tmpdir) / "device.json"
+            device_path.write_text(
+                json.dumps(
+                    {
+                        "image_settings": {
+                            "saturation": 1.9,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            seed_device_defaults(device_path)
+
+            data = json.loads(device_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["image_settings"]["saturation"], 1.9)
+            self.assertEqual(data["image_settings"]["contrast"], 1.4)
+            self.assertEqual(data["image_settings"]["sharpness"], 1.2)
+            self.assertEqual(data["image_settings"]["brightness"], 1.1)
 
     def test_verify_plugin_module_import_smoke(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

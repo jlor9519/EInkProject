@@ -239,20 +239,18 @@ def _settings_menu_keyboard(settings: dict[str, Any]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton("Bildoptimierung", callback_data=_settings_callback_data("select", 0)),
-        ],
-        [
             InlineKeyboardButton(f"Ausrichtung: {_get_current_value(settings, _SETTINGS[1])}", callback_data=_settings_callback_data("select", 1)),
+        ],
+        [
             InlineKeyboardButton(f"Bildanpassung: {_get_current_value(settings, _SETTINGS[2])}", callback_data=_settings_callback_data("select", 2)),
-        ],
-        [
             InlineKeyboardButton(f"Anzeigedauer: {_get_current_value(settings, _SETTINGS[3])}", callback_data=_settings_callback_data("select", 3)),
+        ],
+        [
             InlineKeyboardButton(f"Ruhezeit: {_get_current_value(settings, _SETTINGS[4])}", callback_data=_settings_callback_data("select", 4)),
-        ],
-        [
             InlineKeyboardButton(f"Neue Bilder: {_get_current_value(settings, _SETTINGS[5])}", callback_data=_settings_callback_data("select", 5)),
-            InlineKeyboardButton(f"Täglicher Wechsel: {_get_current_value(settings, _SETTINGS[6])}", callback_data=_settings_callback_data("select", 6)),
         ],
         [
+            InlineKeyboardButton(f"Täglicher Wechsel: {_get_current_value(settings, _SETTINGS[6])}", callback_data=_settings_callback_data("select", 6)),
             InlineKeyboardButton(f"Bilder in Rotation: {_get_current_value(settings, _SETTINGS[7])}", callback_data=_settings_callback_data("select", 7)),
         ],
         [InlineKeyboardButton("Abbrechen", callback_data=_settings_callback_data("close"))],
@@ -413,6 +411,8 @@ def _image_tuning_menu_keyboard(draft: dict[str, float]) -> InlineKeyboardMarkup
                 f"Sättigung: {_format_tuning_value(draft['saturation'])}",
                 callback_data=_settings_callback_data("tuning_field", "saturation"),
             ),
+        ],
+        [
             InlineKeyboardButton(
                 f"Kontrast: {_format_tuning_value(draft['contrast'])}",
                 callback_data=_settings_callback_data("tuning_field", "contrast"),
@@ -423,6 +423,8 @@ def _image_tuning_menu_keyboard(draft: dict[str, float]) -> InlineKeyboardMarkup
                 f"Schärfe: {_format_tuning_value(draft['sharpness'])}",
                 callback_data=_settings_callback_data("tuning_field", "sharpness"),
             ),
+        ],
+        [
             InlineKeyboardButton(
                 f"Helligkeit: {_format_tuning_value(draft['brightness'])}",
                 callback_data=_settings_callback_data("tuning_field", "brightness"),

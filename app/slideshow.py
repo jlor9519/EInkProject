@@ -17,6 +17,9 @@ from app.display_state import (
 )
 from app.time_utils import (
     is_in_local_time_window,
+    local_now,
+    move_local_datetime_to_window_end,
+    next_local_time_occurrence,
     seconds_until_local_time,
     seconds_until_wake_up_time,
 )
@@ -122,10 +125,68 @@ def _seconds_until_time(time_str: str) -> int:
     return _seconds_until_scheduled_occurrence(time_str, 0)
 
 
+def _adjust_candidate_for_quiet_hours(
+    candidate_utc: datetime,
+    schedule: tuple[str, str] | None,
+) -> datetime:
+    if not schedule:
+        return candidate_utc
+    adjusted_local = move_local_datetime_to_window_end(candidate_utc.astimezone(), schedule[0], schedule[1])
+    return adjusted_local.astimezone(timezone.utc)
+
+
+def project_display_change_offsets(
+    services,
+    count: int,
+    *,
+    first_fire_at: datetime | None = None,
+) -> list[int]:
+    if count <= 0:
+        return []
+
+    now_local = local_now()
+    now_utc = now_local.astimezone(timezone.utc)
+    schedule = services.display.get_sleep_schedule()
+    scheduled_time = _get_scheduled_time(services)
+
+    if scheduled_time:
+        offsets: list[int] = []
+        for occurrence_index in range(count):
+            candidate_local = next_local_time_occurrence(
+                scheduled_time,
+                occurrence_index,
+                reference=now_local,
+            )
+            if schedule:
+                candidate_local = move_local_datetime_to_window_end(candidate_local, schedule[0], schedule[1])
+            candidate_utc = candidate_local.astimezone(timezone.utc)
+            offsets.append(max(0, int((candidate_utc - now_utc).total_seconds())))
+        return offsets
+
+    if first_fire_at is None:
+        decision = compute_next_fire_decision(services)
+        first_fire_at = now_utc + timedelta(seconds=decision.seconds)
+    elif first_fire_at.tzinfo is None:
+        first_fire_at = first_fire_at.replace(tzinfo=timezone.utc)
+
+    interval = services.display.get_slideshow_interval()
+    candidate_local = first_fire_at.astimezone()
+    offsets = []
+    for _ in range(count):
+        if schedule:
+            candidate_local = move_local_datetime_to_window_end(candidate_local, schedule[0], schedule[1])
+        candidate_utc = candidate_local.astimezone(timezone.utc)
+        offsets.append(max(0, int((candidate_utc - now_utc).total_seconds())))
+        candidate_local = candidate_local + timedelta(seconds=interval)
+    return offsets
+
+
 def compute_next_fire_decision(services, active_orientation: str | None = None) -> NextFireDecision:
     if active_orientation is None:
         active_orientation = services.display.current_orientation()
 
+    now_local = local_now()
+    now_utc = now_local.astimezone(timezone.utc)
     schedule = services.display.get_sleep_schedule()
     if schedule and _is_in_sleep_window(schedule):
         return NextFireDecision(
@@ -144,12 +205,17 @@ def compute_next_fire_decision(services, active_orientation: str | None = None) 
 
     scheduled = _get_scheduled_time(services)
     if scheduled:
-        first = _seconds_until_time(scheduled)
+        candidate_local = next_local_time_occurrence(scheduled, reference=now_local)
+        candidate_utc = _adjust_candidate_for_quiet_hours(candidate_local.astimezone(timezone.utc), schedule)
+        first = max(1, int((candidate_utc - now_utc).total_seconds()))
         logger.info("Next fire uses scheduled mode in %ds (at %s)", first, scheduled)
         return NextFireDecision(seconds=first, mode="scheduled_daily", detail=scheduled)
 
     interval = services.display.get_slideshow_interval()
-    return NextFireDecision(seconds=interval, mode="interval", detail=str(interval))
+    candidate_utc = now_utc + timedelta(seconds=interval)
+    candidate_utc = _adjust_candidate_for_quiet_hours(candidate_utc, schedule)
+    interval_seconds = max(1, int((candidate_utc - now_utc).total_seconds()))
+    return NextFireDecision(seconds=interval_seconds, mode="interval", detail=str(interval))
 
 
 def _seconds_until_wake_up(schedule: tuple[str, str]) -> int:

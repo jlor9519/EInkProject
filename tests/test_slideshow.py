@@ -7,11 +7,13 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from app.commands import list_command
 from app.database import Database
 from app.models import DisplayResult, ImageRecord
-from app.slideshow import _advance_slideshow
+from app.slideshow import _advance_slideshow, compute_next_fire_decision, project_display_change_offsets
 
 
 class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
@@ -146,6 +148,47 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(services.display.display_calls[-1], "img-2")
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["image_id"], "img-2")
+
+    async def test_interval_next_fire_skips_upcoming_quiet_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir), interval_seconds=3600)
+            services.display.get_sleep_schedule = lambda: ("22:00", "08:00")
+            berlin = ZoneInfo("Europe/Berlin")
+            now = datetime(2026, 4, 1, 21, 30, tzinfo=berlin)
+
+            with patch("app.slideshow.local_now", return_value=now):
+                decision = compute_next_fire_decision(services)
+
+            self.assertEqual(decision.mode, "interval")
+            self.assertEqual(decision.seconds, 10 * 3600 + 30 * 60)
+
+    async def test_scheduled_next_fire_skips_upcoming_quiet_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir), interval_seconds=3600)
+            services.display.get_sleep_schedule = lambda: ("22:00", "08:00")
+            services.database.set_setting("scheduled_change_time", "23:00")
+            berlin = ZoneInfo("Europe/Berlin")
+            now = datetime(2026, 4, 1, 21, 0, tzinfo=berlin)
+
+            with patch("app.slideshow.local_now", return_value=now):
+                decision = compute_next_fire_decision(services)
+
+            self.assertEqual(decision.mode, "scheduled_daily")
+            self.assertEqual(decision.detail, "23:00")
+            self.assertEqual(decision.seconds, 11 * 3600)
+
+    async def test_project_display_offsets_skip_future_quiet_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir), interval_seconds=3600)
+            services.display.get_sleep_schedule = lambda: ("22:00", "08:00")
+            berlin = ZoneInfo("Europe/Berlin")
+            now = datetime(2026, 4, 1, 20, 0, tzinfo=berlin)
+            first_fire_at = now.astimezone(timezone.utc) + timedelta(hours=1)
+
+            with patch("app.slideshow.local_now", return_value=now):
+                offsets = project_display_change_offsets(services, 3, first_fire_at=first_fire_at)
+
+            self.assertEqual(offsets, [3600, 12 * 3600, 13 * 3600])
 
     def assert_future_timestamp(self, raw: str | None) -> None:
         self.assertIsNotNone(raw)
