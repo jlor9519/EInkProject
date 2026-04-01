@@ -102,6 +102,31 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         reply = update.effective_message.replies[0]
         self.assertIn("08:30", reply)
 
+    async def test_interval_change_resets_timer_from_now(self) -> None:
+        services = _FakeServices(is_admin=True)
+        update = _FakeUpdate("2h", user_id=11)
+        context = _FakeContext(services, with_job_queue=True)
+        context.user_data[PENDING_SETTINGS_KEY] = 6
+
+        result = await receive_settings_value(update, context)
+
+        self.assertEqual(result, ConversationHandler.END)
+        self.assertIn("Timer wurde ab jetzt", update.effective_message.replies[0])
+        self.assertEqual(context.application.job_queue.calls[-1]["interval"], 7200)
+        self.assertEqual(context.application.job_queue.calls[-1]["first"], 7200)
+
+    async def test_interval_change_mentions_scheduled_override_when_active(self) -> None:
+        services = _FakeServices(is_admin=True)
+        services.database.set_setting("scheduled_change_time", "09:00")
+        update = _FakeUpdate("2h", user_id=11)
+        context = _FakeContext(services, with_job_queue=True)
+        context.user_data[PENDING_SETTINGS_KEY] = 6
+
+        result = await receive_settings_value(update, context)
+
+        self.assertEqual(result, ConversationHandler.END)
+        self.assertIn("überschreibt diese Anzeigedauer", update.effective_message.replies[0])
+
     async def test_receive_settings_value_applies_and_confirms_value(self) -> None:
         services = _FakeServices(is_admin=True)
         services.display.apply_result = DeviceSettingsApplyResult(
@@ -268,6 +293,7 @@ class _FakeAuth:
 class _FakeDisplay:
     def __init__(self) -> None:
         self.device_config_path = "/tmp/device.json"
+        self.orientation = "vertical"
         self.settings = {
             "orientation": "vertical",
             "inverted_image": True,
@@ -289,12 +315,16 @@ class _FakeDisplay:
         )
         self.last_updates: dict[str, object] | None = None
         self.last_refresh_current: bool | None = None
+        self.interval_seconds = 86400
 
     def read_device_settings(self) -> dict[str, object]:
         return self.settings
 
+    def current_orientation(self) -> str:
+        return self.orientation
+
     def get_slideshow_interval(self) -> int:
-        return 86400
+        return self.interval_seconds
 
     def get_sleep_schedule(self) -> tuple[str, str] | None:
         return None
@@ -309,6 +339,18 @@ class _FakeDisplay:
         self.last_refresh_current = refresh_current
         return self.apply_result
 
+    def set_slideshow_interval(self, seconds: int) -> DeviceSettingsApplyResult:
+        self.interval_seconds = seconds
+        return DeviceSettingsApplyResult(
+            success=True,
+            message="ok",
+            confirmed_settings={"slideshow_interval": seconds},
+            device_config_path=self.device_config_path,
+            saved=True,
+            reloaded=True,
+            refreshed=True,
+        )
+
 
 class _FakeDatabase:
     def __init__(self) -> None:
@@ -319,6 +361,9 @@ class _FakeDatabase:
 
     def set_setting(self, key: str, value: str) -> None:
         self._settings[key] = value
+
+    def count_rendered_images(self, active_orientation: str | None = None) -> int:
+        return 0
 
 
 class _FakeServices:
@@ -355,9 +400,29 @@ class _FakeUpdate:
 
 
 class _FakeContext:
-    def __init__(self, services: _FakeServices):
-        self.application = SimpleNamespace(bot_data={"services": services, "display_lock": asyncio.Lock()}, job_queue=None)
+    def __init__(self, services: _FakeServices, *, with_job_queue: bool = False):
+        self.application = SimpleNamespace(
+            bot_data={"services": services, "display_lock": asyncio.Lock()},
+            job_queue=_FakeJobQueue() if with_job_queue else None,
+        )
         self.user_data: dict[str, object] = {}
+
+
+class _FakeJob:
+    def schedule_removal(self) -> None:
+        return None
+
+
+class _FakeJobQueue:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def get_jobs_by_name(self, name: str):
+        return []
+
+    def run_repeating(self, callback, *, interval: int, first: int, name: str) -> _FakeJob:
+        self.calls.append({"interval": interval, "first": first, "name": name})
+        return _FakeJob()
 
 
 class _RealishDisplay:

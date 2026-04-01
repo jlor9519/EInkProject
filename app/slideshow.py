@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timedelta, timezone
 
 from telegram.ext import Application
@@ -13,12 +14,32 @@ from app.database import utcnow_iso
 logger = logging.getLogger(__name__)
 
 JOB_NAME = "slideshow_advance"
+RETRY_DELAY_SECONDS = 60
+
+
+@dataclass(slots=True)
+class NextFireDecision:
+    seconds: int
+    mode: str
+    detail: str | None = None
 
 
 def _set_next_fire_at(services, seconds: int) -> None:
     """Store the expected next-fire timestamp so /list can show an accurate countdown."""
     next_fire = datetime.now(timezone.utc) + timedelta(seconds=seconds)
     services.database.set_setting("slideshow_next_fire_at", next_fire.isoformat())
+
+
+def _set_next_fire_decision(services, decision: NextFireDecision) -> None:
+    _set_next_fire_at(services, decision.seconds)
+    services.database.set_setting("slideshow_next_fire_mode", decision.mode)
+    services.database.set_setting("slideshow_next_fire_detail", decision.detail or "")
+
+
+def get_stored_next_fire_metadata(services) -> tuple[str | None, str | None]:
+    mode = services.database.get_setting("slideshow_next_fire_mode") or None
+    detail = services.database.get_setting("slideshow_next_fire_detail") or None
+    return mode, detail
 
 
 def schedule_slideshow_job(application: Application) -> None:
@@ -29,29 +50,15 @@ def schedule_slideshow_job(application: Application) -> None:
     services = application.bot_data["services"]
     active_orientation = services.display.current_orientation()
     interval = services.display.get_slideshow_interval()
-
-    # If rendered images are waiting, fire sooner based on cooldown
-    rendered_count = services.database.count_rendered_images(active_orientation)
-    if rendered_count > 0:
-        cooldown = _get_cooldown_seconds(services)
-        remaining = _cooldown_remaining(services, cooldown)
-        first = max(1, remaining) if remaining > 0 else 1
-        logger.info("Startup: %d rendered image(s) waiting, first fire in %ds", rendered_count, first)
-    else:
-        scheduled = _get_scheduled_time(services)
-        if scheduled:
-            first = _seconds_until_time(scheduled)
-            logger.info("Startup: scheduled mode active, first fire in %ds (at %s)", first, scheduled)
-        else:
-            first = interval
+    decision = compute_next_fire_decision(services, active_orientation)
 
     application.job_queue.run_repeating(
         _advance_slideshow,
         interval=interval,
-        first=first,
+        first=decision.seconds,
         name=JOB_NAME,
     )
-    _set_next_fire_at(services, first)
+    _set_next_fire_decision(services, decision)
     logger.info("Slideshow job scheduled with interval %ds", interval)
 
 
@@ -76,23 +83,20 @@ def reschedule_slideshow_job(
     if interval_seconds is None:
         interval_seconds = services.display.get_slideshow_interval()
     if first_seconds is None:
-        scheduled = _get_scheduled_time(services)
-        if scheduled:
-            first_seconds = _seconds_until_time(scheduled)
-            logger.info("Rescheduling: scheduled mode active, next fire in %ds (at %s)", first_seconds, scheduled)
-        else:
-            first_seconds = interval_seconds
+        decision = compute_next_fire_decision(services, services.display.current_orientation())
+    else:
+        decision = NextFireDecision(seconds=first_seconds, mode="manual_reset")
 
     application.job_queue.run_repeating(
         _advance_slideshow,
         interval=interval_seconds,
-        first=first_seconds,
+        first=decision.seconds,
         name=JOB_NAME,
     )
     # Sync the displayed-at timestamp so /list countdown matches the new timer
     services.database.set_setting("current_image_displayed_at", utcnow_iso())
-    _set_next_fire_at(services, first_seconds)
-    logger.info("Slideshow job rescheduled with interval %ds, first in %ds", interval_seconds, first_seconds)
+    _set_next_fire_decision(services, decision)
+    logger.info("Slideshow job rescheduled with interval %ds, first in %ds", interval_seconds, decision.seconds)
 
 
 def _get_scheduled_time(services) -> str | None:
@@ -100,15 +104,52 @@ def _get_scheduled_time(services) -> str | None:
     return services.database.get_setting("scheduled_change_time") or None
 
 
-def _seconds_until_time(time_str: str) -> int:
-    """Seconds from now until the next occurrence of HH:MM (today or tomorrow)."""
+def _seconds_until_scheduled_occurrence(time_str: str, occurrence_index: int = 0) -> int:
+    """Seconds from now until the next occurrence of HH:MM, optionally N days later."""
     h, m = time_str.split(":")
     target_time = dt_time(int(h), int(m))
     now = datetime.now()
     target = now.replace(hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
+    if occurrence_index > 0:
+        target += timedelta(days=occurrence_index)
     return max(1, int((target - now).total_seconds()))
+
+
+def _seconds_until_time(time_str: str) -> int:
+    """Seconds from now until the next occurrence of HH:MM (today or tomorrow)."""
+    return _seconds_until_scheduled_occurrence(time_str, 0)
+
+
+def compute_next_fire_decision(services, active_orientation: str | None = None) -> NextFireDecision:
+    if active_orientation is None:
+        active_orientation = services.display.current_orientation()
+
+    schedule = services.display.get_sleep_schedule()
+    if schedule and _is_in_sleep_window(schedule):
+        return NextFireDecision(
+            seconds=_seconds_until_wake_up(schedule),
+            mode="quiet_hours",
+            detail=schedule[1],
+        )
+
+    rendered_count = services.database.count_rendered_images(active_orientation)
+    if rendered_count > 0:
+        cooldown = _get_cooldown_seconds(services)
+        remaining = _cooldown_remaining(services, cooldown)
+        first = max(1, remaining) if remaining > 0 else 1
+        logger.info("Next fire uses rendered queue/cooldown in %ds", first)
+        return NextFireDecision(seconds=first, mode="cooldown_queue")
+
+    scheduled = _get_scheduled_time(services)
+    if scheduled:
+        first = _seconds_until_time(scheduled)
+        logger.info("Next fire uses scheduled mode in %ds (at %s)", first, scheduled)
+        return NextFireDecision(seconds=first, mode="scheduled_daily", detail=scheduled)
+
+    interval = services.display.get_slideshow_interval()
+    return NextFireDecision(seconds=interval, mode="interval", detail=str(interval))
 
 
 def _seconds_until_wake_up(schedule: tuple[str, str]) -> int:
@@ -172,6 +213,10 @@ async def _try_display_next_rendered(context, services, lock) -> bool:
             rendered.status = "failed"
             rendered.last_error = "Original file missing"
             services.database.upsert_image(rendered)
+            _reschedule_for(
+                context.application,
+                NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="payload_missing"),
+            )
             return True
 
     result = await _display_target(services, rendered)
@@ -184,23 +229,22 @@ async def _try_display_next_rendered(context, services, lock) -> bool:
         logger.info("Displayed rendered image %s from cooldown queue", rendered.image_id)
 
         # If more rendered images are waiting, use cooldown as next interval
-        more = services.database.count_rendered_images(active_orientation)
-        if more > 0 and cooldown > 0:
-            next_interval = cooldown
-        else:
-            scheduled = _get_scheduled_time(services)
-            next_interval = _seconds_until_time(scheduled) if scheduled else services.display.get_slideshow_interval()
-        _reschedule_for(context.application, next_interval)
+        next_decision = compute_next_fire_decision(services, active_orientation)
+        _reschedule_for(context.application, next_decision)
     else:
         rendered.status = "display_failed"
         rendered.last_error = result.message
         services.database.upsert_image(rendered)
         logger.warning("Failed to display rendered image %s: %s", rendered.image_id, result.message)
+        _reschedule_for(
+            context.application,
+            NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="display_error", detail=result.message),
+        )
 
     return True
 
 
-def _reschedule_for(application: Application, seconds: int) -> None:
+def _reschedule_for(application: Application, decision: int | NextFireDecision) -> None:
     """Reschedule the slideshow job to fire in `seconds`."""
     if application.job_queue is None:
         return
@@ -209,14 +253,16 @@ def _reschedule_for(application: Application, seconds: int) -> None:
         job.schedule_removal()
     services = application.bot_data["services"]
     interval = services.display.get_slideshow_interval()
-    first = max(1, seconds)
+    if isinstance(decision, int):
+        decision = NextFireDecision(seconds=decision, mode="manual_reset")
+    first = max(1, decision.seconds)
     application.job_queue.run_repeating(
         _advance_slideshow,
         interval=interval,
         first=first,
         name=JOB_NAME,
     )
-    _set_next_fire_at(services, first)
+    _set_next_fire_decision(services, NextFireDecision(seconds=first, mode=decision.mode, detail=decision.detail))
     logger.info("Slideshow rescheduled, next fire in %ds", first)
 
 
@@ -230,14 +276,22 @@ async def _advance_slideshow(context) -> None:
     # Check sleep schedule
     schedule = services.display.get_sleep_schedule()
     if schedule and _is_in_sleep_window(schedule):
-        wake_seconds = _seconds_until_wake_up(schedule)
-        _reschedule_for(context.application, wake_seconds)
-        logger.info("Sleep active — rescheduled slideshow for wake-up in %ds", wake_seconds)
+        decision = NextFireDecision(
+            seconds=_seconds_until_wake_up(schedule),
+            mode="quiet_hours",
+            detail=schedule[1],
+        )
+        _reschedule_for(context.application, decision)
+        logger.info("Sleep active — rescheduled slideshow for wake-up in %ds", decision.seconds)
         return
 
     # Skip if display is busy (non-blocking check)
     if lock.locked():
         logger.info("Skipping auto-advance — display is busy")
+        _reschedule_for(
+            context.application,
+            NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="retry_busy"),
+        )
         return
 
     async with lock:
@@ -248,34 +302,49 @@ async def _advance_slideshow(context) -> None:
         # Normal rotation
         payload_path = services.config.storage.current_payload_path
         if not payload_path.exists():
+            _reschedule_for(
+                context.application,
+                NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="payload_missing"),
+            )
             return
 
         try:
             payload = json.loads(payload_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             logger.warning("Auto-advance: could not read payload")
+            _reschedule_for(
+                context.application,
+                NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="payload_missing"),
+            )
             return
 
         current_image_id = payload.get("image_id")
         if not current_image_id:
+            _reschedule_for(
+                context.application,
+                NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="payload_missing"),
+            )
             return
 
         target = services.database.get_adjacent_image(current_image_id, "next", active_orientation)
         if target is None:
             logger.debug("Auto-advance: no next image (only 1 in rotation?)")
+            base_decision = compute_next_fire_decision(services, active_orientation)
+            _reschedule_for(
+                context.application,
+                NextFireDecision(seconds=base_decision.seconds, mode="single_image", detail=base_decision.detail),
+            )
             return
 
         result = await _display_target(services, target)
 
         if result.success:
             services.database.set_setting("current_image_displayed_at", utcnow_iso())
-            scheduled = _get_scheduled_time(services)
-            if scheduled:
-                next_seconds = _seconds_until_time(scheduled)
-                _reschedule_for(context.application, next_seconds)
-            else:
-                interval = services.display.get_slideshow_interval()
-                _set_next_fire_at(services, interval)
+            _reschedule_for(context.application, compute_next_fire_decision(services, active_orientation))
             logger.info("Auto-advanced to image %s", target.image_id)
         else:
             logger.warning("Auto-advance failed: %s", result.message)
+            _reschedule_for(
+                context.application,
+                NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="display_error", detail=result.message),
+            )

@@ -484,9 +484,15 @@ async def receive_settings_value(update: Update, context: ContextTypes.DEFAULT_T
             return ConversationHandler.END
         label = _format_interval_label(seconds)
         status = f"{s.label} ist jetzt {label}" if result.success else f"{s.label} wurde als {label} gespeichert"
-        await update.effective_message.reply_text(f"{status}.\n{result.message}")
         from app.slideshow import reschedule_slideshow_job
         reschedule_slideshow_job(context.application, interval_seconds=seconds)
+        scheduled = services.database.get_setting("scheduled_change_time") or ""
+        note = (
+            f"\nDer Timer wurde ab jetzt auf {label} zurückgesetzt."
+            if not scheduled
+            else f"\nHinweis: Täglicher Bildwechsel um {scheduled} ist aktiv und überschreibt diese Anzeigedauer momentan."
+        )
+        await update.effective_message.reply_text(f"{status}.{note}\n{result.message}")
         return ConversationHandler.END
     elif s.kind == "scheduled_time":
         if text in ("keine", "kein", "no", "off", "deaktivieren", "deaktiviert"):

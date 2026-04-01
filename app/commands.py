@@ -44,7 +44,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "/next - nächstes Bild anzeigen",
                 "/prev - vorheriges Bild anzeigen",
                 "/list - nächste Bilder und Zeitplan anzeigen",
-                "/delete - aktuelles Bild löschen",
+                "/delete - ausgewähltes Bild löschen",
                 # "/refresh - aktuelles Bild neu laden",
                 # "/settings - Anzeigeeinstellungen anzeigen/ändern (nur Admins)",
                 # "/users - freigegebene Nutzer anzeigen (nur Admins)",
@@ -214,6 +214,26 @@ def _image_label(record: ImageRecord) -> str:
     return " • ".join(parts) if parts else "(kein Text)"
 
 
+def _format_timer_mode_label(mode: str | None, detail: str | None, interval_seconds: int) -> str:
+    from app.settings_conversation import _format_interval_label
+
+    if mode == "scheduled_daily" and detail:
+        return f"Modus: täglicher Wechsel um {detail}"
+    if mode == "cooldown_queue":
+        return "Modus: Warteschlange / Cooldown"
+    if mode == "quiet_hours" and detail:
+        return f"Modus: Ruhezeit bis {detail}"
+    if mode == "retry_busy":
+        return "Modus: kurze Wiederholung, Anzeige ist gerade beschäftigt"
+    if mode == "payload_missing":
+        return "Modus: kurze Wiederholung, aktuelles Bild konnte nicht gelesen werden"
+    if mode == "display_error":
+        return "Modus: kurze Wiederholung nach Anzeigeproblem"
+    if mode == "single_image":
+        return "Modus: ein Bild in Rotation"
+    return f"Modus: Intervall {_format_interval_label(interval_seconds)}"
+
+
 @require_whitelist
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
@@ -256,7 +276,12 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # Time remaining until next image change — read directly from stored timestamp
     from datetime import datetime, timezone as tz
-    from app.slideshow import _is_in_sleep_window, _seconds_until_wake_up
+    from app.slideshow import (
+        _seconds_until_scheduled_occurrence,
+        _set_next_fire_decision,
+        compute_next_fire_decision,
+        get_stored_next_fire_metadata,
+    )
     from app.settings_conversation import _format_interval_label
     now = datetime.now(tz.utc)
     next_fire_raw = services.database.get_setting("slideshow_next_fire_at")
@@ -269,9 +294,19 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             remaining = max(0, int((next_fire - now).total_seconds()))
         except (ValueError, TypeError):
             remaining = 0
+    stored_mode, stored_detail = get_stored_next_fire_metadata(services)
+    if remaining <= 0:
+        decision = compute_next_fire_decision(services, active_orientation)
+        remaining = decision.seconds
+        stored_mode, stored_detail = decision.mode, decision.detail
+        _set_next_fire_decision(services, decision)
+    elif stored_mode is None:
+        decision = compute_next_fire_decision(services, active_orientation)
+        stored_mode, stored_detail = decision.mode, decision.detail
 
     remaining_str = _format_interval_label(remaining) if remaining > 0 else "weniger als 1 Minute"
     lines.append(f"  Wechsel in ca. {remaining_str}")
+    lines.append(f"  {_format_timer_mode_label(stored_mode, stored_detail, interval)}")
 
     # Show pending new images (rendered, waiting for cooldown)
     rendered_count = services.database.count_rendered_images(active_orientation)
@@ -287,10 +322,14 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if next_images:
         lines.append("")
         lines.append("Nächste Bilder:")
+        scheduled_mode_for_list = stored_mode == "scheduled_daily" and bool(stored_detail) and rendered_count == 0
         for i, record in enumerate(next_images, 1):
             pos = ((current_pos or 0) + i - 1) % total + 1
             lines.append(f"{i}. [{pos}/{total}] {_image_label(record)}")
-            offset = remaining + (i - 1) * interval
+            if scheduled_mode_for_list:
+                offset = _seconds_until_scheduled_occurrence(stored_detail, i - 1)
+            else:
+                offset = remaining + (i - 1) * interval
             eta_str = _format_interval_label(offset) if offset > 0 else "weniger als 1 Minute"
             lines.append(f"   In ca. {eta_str}")
 

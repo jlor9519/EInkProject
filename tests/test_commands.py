@@ -212,6 +212,130 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Horizontal", update_list.effective_message.replies[0])
             self.assertIn("nicht Teil der aktuellen Bibliothek", update_list.effective_message.replies[0])
 
+    async def test_list_self_heals_stale_interval_timer_and_shows_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.database.set_setting("slideshow_next_fire_at", "2000-01-01T00:00:00+00:00")
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-1"}),
+                encoding="utf-8",
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-1.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Current",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await list_command(update, context)
+
+            reply = update.effective_message.replies[0]
+            self.assertIn("Modus: Intervall", reply)
+            self.assertNotIn("Wechsel in ca. weniger als 1 Minute", reply)
+            self.assertNotEqual(services.database.get_setting("slideshow_next_fire_at"), "2000-01-01T00:00:00+00:00")
+
+    async def test_list_shows_cooldown_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.database.set_setting("new_image_cooldown", "3600")
+            services.database.set_setting("last_new_image_displayed_at", "2099-01-01T00:00:00+00:00")
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-1"}),
+                encoding="utf-8",
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-1.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Current",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-2",
+                    telegram_file_id="file-2",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-2.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Queued",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:05:00+00:00",
+                    status="rendered",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await list_command(update, context)
+
+            self.assertIn("Modus: Warteschlange / Cooldown", update.effective_message.replies[0])
+
+    async def test_list_shows_quiet_hours_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.display.sleep_schedule = ("00:00", "23:59")
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-1"}),
+                encoding="utf-8",
+            )
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-1.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Current",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            services.database.set_setting("slideshow_next_fire_at", "2000-01-01T00:00:00+00:00")
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await list_command(update, context)
+
+            self.assertIn("Modus: Ruhezeit bis 23:59", update.effective_message.replies[0])
+
     async def test_next_promotes_oldest_rendered_image_before_displayed_rotation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -403,6 +527,7 @@ class _FakeDisplay:
     def __init__(self) -> None:
         self.orientation = "horizontal"
         self.display_calls: list[str] = []
+        self.sleep_schedule = None
 
     def current_orientation(self) -> str:
         return self.orientation
@@ -421,7 +546,7 @@ class _FakeDisplay:
         return 86400
 
     def get_sleep_schedule(self):
-        return None
+        return self.sleep_schedule
 
 
 class _FakeAuth:
