@@ -14,6 +14,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, ContextTypes
 
 from app.auth import require_admin
+from app.commands import _delete_query_message
 from app.models import AppServices, MaintenanceJobRecord
 
 logger = logging.getLogger(__name__)
@@ -168,7 +169,7 @@ async def maintenance_cancel_callback(update: Update, context: ContextTypes.DEFA
     if query is None:
         return
     await query.answer()
-    await _edit_query_message(query, "Wartung abgebrochen.")
+    await _delete_query_message(context, query)
 
 
 async def notify_maintenance_updates(application: Application) -> None:

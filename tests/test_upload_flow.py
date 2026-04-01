@@ -8,8 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from telegram.error import TimedOut
+from telegram.ext import ConversationHandler
 
-from app.conversations import PENDING_SUBMISSION_KEY, WAITING_FOR_TEXT_CHOICE, _submit_photo, photo_entry, process_queued_upload
+from app.conversations import PENDING_SUBMISSION_KEY, WAITING_FOR_TEXT_CHOICE, _submit_photo, photo_button_callback, photo_entry, process_queued_upload
 from app.database import Database
 from app.models import DisplayResult, ImageRecord
 
@@ -28,6 +29,34 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, WAITING_FOR_TEXT_CHOICE)
             self.assertEqual(context.user_data[PENDING_SUBMISSION_KEY]["caption"], "Schon im Foto")
             self.assertEqual(context.user_data[PENDING_SUBMISSION_KEY]["orientation_bucket"], "horizontal")
+            markup = update.effective_message.reply_markups[0]
+            labels = [button.text for row in markup.inline_keyboard for button in row]
+            self.assertIn("Abbrechen", labels)
+
+    async def test_photo_cancel_deletes_message_and_cleans_pending_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            application = _FakeApplication(services)
+            context = _FakeContext(application)
+            original_path = tmpdir_path / "incoming" / "img-1.jpg"
+            original_path.parent.mkdir(parents=True, exist_ok=True)
+            original_path.write_bytes(b"original")
+            context.user_data[PENDING_SUBMISSION_KEY] = {
+                "image_id": "img-1",
+                "telegram_file_id": "file-1",
+                "original_path": str(original_path),
+                "caption": "",
+                "orientation_bucket": "horizontal",
+            }
+            update = _FakeCallbackUpdate(data="photo_cancel", user_id=1, chat_id=101)
+
+            result = await photo_button_callback(update, context)
+
+            self.assertEqual(result, ConversationHandler.END)
+            self.assertNotIn(PENDING_SUBMISSION_KEY, context.user_data)
+            self.assertFalse(original_path.exists())
+            self.assertEqual(application.bot.deleted_messages, [(101, 202)])
 
     async def test_new_upload_is_tagged_with_active_orientation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -328,11 +357,15 @@ class _FakeBot:
     def __init__(self, *, send_side_effect: Exception | None = None) -> None:
         self.send_side_effect = send_side_effect
         self.messages: list[tuple[int, str]] = []
+        self.deleted_messages: list[tuple[int | None, int | None]] = []
 
     async def send_message(self, *, chat_id: int, text: str, write_timeout: int = 60) -> None:
         if self.send_side_effect is not None:
             raise self.send_side_effect
         self.messages.append((chat_id, text))
+
+    async def delete_message(self, chat_id=None, message_id=None) -> None:
+        self.deleted_messages.append((chat_id, message_id))
 
 
 class _FakeTelegramFile:
@@ -359,9 +392,11 @@ class _FakeMessage:
         self.photo = [_FakePhoto(photo_token)]
         self.caption = caption
         self.replies: list[str] = []
+        self.reply_markups: list[object | None] = []
 
     async def reply_text(self, text: str, reply_markup=None, write_timeout: int = 60) -> None:
         self.replies.append(text)
+        self.reply_markups.append(reply_markup)
 
 
 class _FailingQueue:
@@ -388,6 +423,38 @@ class _FakeUpdate:
         self.effective_chat = _FakeChat(chat_id)
         self.effective_message = _FakeMessage(photo_token=photo_token, caption=caption)
         self.callback_query = None
+
+
+class _FakeCallbackQuery:
+    def __init__(self, *, data: str, chat_id: int) -> None:
+        self.data = data
+        self.message = SimpleNamespace(
+            photo=[],
+            document=None,
+            animation=None,
+            video=None,
+            chat_id=chat_id,
+            message_id=202,
+        )
+        self.text_edits: list[str] = []
+        self.caption_edits: list[str] = []
+
+    async def answer(self) -> None:
+        return None
+
+    async def edit_message_text(self, text: str, reply_markup=None) -> None:
+        self.text_edits.append(text)
+
+    async def edit_message_caption(self, *, caption: str, reply_markup=None) -> None:
+        self.caption_edits.append(caption)
+
+
+class _FakeCallbackUpdate:
+    def __init__(self, *, data: str, user_id: int, chat_id: int) -> None:
+        self.effective_user = _FakeUser(user_id)
+        self.effective_chat = _FakeChat(chat_id)
+        self.callback_query = _FakeCallbackQuery(data=data, chat_id=chat_id)
+        self.effective_message = None
 
 
 class _FakeContext:

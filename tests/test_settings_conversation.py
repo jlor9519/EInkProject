@@ -52,7 +52,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Ausrichtung: Hochformat", labels)
         self.assertIn("Bildanpassung: Zuschneiden", labels)
         self.assertIn("Täglicher Wechsel: Deaktiviert", labels)
-        self.assertIn("Schließen", labels)
+        self.assertIn("Abbrechen", labels)
 
     async def test_settings_callback_opens_prompt_from_button(self) -> None:
         services = _FakeServices(is_admin=True)
@@ -68,6 +68,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Hochformat", labels)
         self.assertIn("Querformat", labels)
         self.assertIn("Zurück", labels)
+        self.assertIn("Abbrechen", labels)
 
     async def test_settings_callback_back_returns_to_menu(self) -> None:
         services = _FakeServices(is_admin=True)
@@ -294,7 +295,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Ausrichtung ist jetzt Querformat", update.callback_query.text_edits[0])
         self.assertIn("\n\nEinstellungen", update.callback_query.text_edits[0])
         labels = [button.text for row in update.callback_query.text_edit_markups[0].inline_keyboard for button in row]
-        self.assertIn("Schließen", labels)
+        self.assertIn("Abbrechen", labels)
 
 
 class OrientationSwitchTests(unittest.IsolatedAsyncioTestCase):

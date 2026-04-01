@@ -13,6 +13,7 @@ from app.maintenance import (
     MAINTENANCE_LOCK_KEY,
     _launch_maintenance_job_runner,
     maintenance_confirm_callback,
+    maintenance_cancel_callback,
     notify_maintenance_updates,
     restart_command,
     update_command,
@@ -32,6 +33,20 @@ class MaintenanceCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Raspberry Pi jetzt neu starten?", restart_update.effective_message.replies[0]["text"])
         self.assertIn("Projekt jetzt aktualisieren?", update_update.effective_message.replies[0]["text"])
+        restart_labels = [button.text for row in restart_update.effective_message.replies[0]["kwargs"]["reply_markup"].inline_keyboard for button in row]
+        update_labels = [button.text for row in update_update.effective_message.replies[0]["kwargs"]["reply_markup"].inline_keyboard for button in row]
+        self.assertIn("Abbrechen", restart_labels)
+        self.assertIn("Abbrechen", update_labels)
+
+    async def test_maintenance_cancel_callback_deletes_message(self) -> None:
+        services = _build_services(Path(tempfile.mkdtemp()))
+        context = _FakeContext(services)
+        update = _CallbackUpdate(data="maintenance_cancel:update", user_id=1, chat_id=999)
+
+        await maintenance_cancel_callback(update, context)
+
+        self.assertEqual(context.application.bot.deleted_messages, [(999, 222)])
+        self.assertEqual(update.callback_query.text_edits, [])
 
     async def test_confirm_callback_creates_update_job_and_starts_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -268,6 +283,8 @@ class _FakeQueryMessage:
         self.document = None
         self.animation = None
         self.video = None
+        self.chat_id = 999
+        self.message_id = 222
 
 
 class _FakeCallbackQuery:
@@ -296,9 +313,13 @@ class _CallbackUpdate:
 class _FakeBot:
     def __init__(self) -> None:
         self.messages: list[tuple[int, str]] = []
+        self.deleted_messages: list[tuple[int | None, int | None]] = []
 
     async def send_message(self, chat_id: int, text: str) -> None:
         self.messages.append((chat_id, text))
+
+    async def delete_message(self, chat_id=None, message_id=None) -> None:
+        self.deleted_messages.append((chat_id, message_id))
 
 
 class _FakeApplication:

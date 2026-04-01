@@ -22,7 +22,7 @@ from telegram.ext import (
 )
 
 from app.auth import require_whitelist
-from app.commands import get_display_lock, get_services
+from app.commands import _delete_query_message, get_display_lock, get_services
 from app.database import utcnow_iso
 from app.models import DisplayRequest, ImageRecord
 from app.orientation import format_orientation_label, orientation_matches
@@ -125,6 +125,7 @@ async def photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             InlineKeyboardButton("Ja", callback_data="photo_text_yes"),
             InlineKeyboardButton("Nein", callback_data="photo_text_no"),
         ],
+        [InlineKeyboardButton("Abbrechen", callback_data="photo_cancel")],
     ])
     await message.reply_text(
         "Möchtest du Text hinzufügen (Ort, Datum, Bildunterschrift)?",
@@ -362,14 +363,8 @@ async def photo_button_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
     if data == "photo_cancel":
-        try:
-            await query.edit_message_text("Upload abgebrochen.")
-        except Exception:
-            try:
-                await query.edit_message_caption(caption="Upload abgebrochen.")
-            except Exception:
-                pass
         _discard_pending_submission(context)
+        await _delete_query_message(context, query)
         return ConversationHandler.END
 
     return ConversationHandler.END

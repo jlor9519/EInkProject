@@ -117,7 +117,8 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
 
         await _delete_cancel_callback(update, context)
 
-        self.assertEqual(update.callback_query.caption_edits, ["Löschen abgebrochen."])
+        self.assertEqual(context.bot.deleted_messages, [(111, 222)])
+        self.assertEqual(update.callback_query.caption_edits, [])
         self.assertEqual(update.callback_query.text_edits, [])
 
     async def test_status_and_list_use_active_orientation_library(self) -> None:
@@ -485,7 +486,7 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Liste", labels)
         self.assertIn("Löschen", labels)
         self.assertIn("Einstellungen", labels)
-        self.assertIn("Schließen", labels)
+        self.assertIn("Abbrechen", labels)
         self.assertIn("/settings - Anzeigeeinstellungen anzeigen/ändern", update.effective_message.replies[0])
 
     async def test_status_command_adds_admin_quick_actions(self) -> None:
@@ -502,6 +503,7 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Vorheriges", labels)
             self.assertIn("Nächstes", labels)
             self.assertIn("Löschen", labels)
+            self.assertIn("Abbrechen", labels)
             self.assertIn("Einstellungen", labels)
 
     async def test_list_command_adds_quick_actions(self) -> None:
@@ -540,6 +542,7 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Vorheriges", labels)
             self.assertIn("Nächstes", labels)
             self.assertIn("Löschen", labels)
+            self.assertIn("Abbrechen", labels)
             self.assertNotIn("Neu laden", labels)
 
     async def test_command_action_callback_edits_status_message(self) -> None:

@@ -45,7 +45,7 @@ def _quick_actions_help(is_admin: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton("Vorheriges", callback_data=_command_callback_data("prev")),
             InlineKeyboardButton("Nächstes", callback_data=_command_callback_data("next")),
         ],
-        [InlineKeyboardButton("Schließen", callback_data=_command_callback_data("close"))],
+        [InlineKeyboardButton("Abbrechen", callback_data=_command_callback_data("close"))],
     ]
     if is_admin:
         rows.append([InlineKeyboardButton("Einstellungen", callback_data="settings|open")])
@@ -62,6 +62,7 @@ def _quick_actions_status(is_admin: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton("Vorheriges", callback_data=_command_callback_data("prev")),
             InlineKeyboardButton("Nächstes", callback_data=_command_callback_data("next")),
         ],
+        [InlineKeyboardButton("Abbrechen", callback_data=_command_callback_data("close"))],
     ]
     if is_admin:
         rows.append([InlineKeyboardButton("Einstellungen", callback_data="settings|open")])
@@ -76,6 +77,7 @@ def _quick_actions_list() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Nächstes", callback_data=_command_callback_data("next")),
             ],
             [InlineKeyboardButton("Löschen", callback_data=_command_callback_data("delete"))],
+            [InlineKeyboardButton("Abbrechen", callback_data=_command_callback_data("close"))],
         ]
     )
 
@@ -882,7 +884,7 @@ async def _delete_cancel_callback(update: Update, context: ContextTypes.DEFAULT_
     if query is None:
         return
     await query.answer()
-    await _edit_query_message(query, "Löschen abgebrochen.")
+    await _delete_query_message(context, query)
 
 
 @require_admin

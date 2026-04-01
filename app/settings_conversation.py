@@ -190,7 +190,7 @@ def _settings_menu_keyboard(settings: dict[str, Any]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"Neue Bilder: {_get_current_value(settings, _SETTINGS[8])}", callback_data=_settings_callback_data("select", 8)),
             InlineKeyboardButton(f"Täglicher Wechsel: {_get_current_value(settings, _SETTINGS[9])}", callback_data=_settings_callback_data("select", 9)),
         ],
-        [InlineKeyboardButton("Schließen", callback_data=_settings_callback_data("close"))],
+        [InlineKeyboardButton("Abbrechen", callback_data=_settings_callback_data("close"))],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -217,7 +217,7 @@ def _settings_prompt_keyboard(idx: int, s: _SettingDef) -> InlineKeyboardMarkup:
     rows.append(
         [
             InlineKeyboardButton("Zurück", callback_data=_settings_callback_data("back")),
-            InlineKeyboardButton("Schließen", callback_data=_settings_callback_data("close")),
+            InlineKeyboardButton("Abbrechen", callback_data=_settings_callback_data("close")),
         ]
     )
     return InlineKeyboardMarkup(rows)
