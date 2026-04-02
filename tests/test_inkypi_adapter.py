@@ -151,6 +151,7 @@ class InkyPiAdapterTests(unittest.TestCase):
             payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["orientation_hint"], "horizontal")
             self.assertEqual(payload["prepared_image_path"], str(storage_config.current_image_path))
+            self.assertEqual(payload["emoji_font_path"], display_config.emoji_font_path)
             self.assertEqual(payload["caption_bar_height"], 44)
             self.assertEqual(payload["caption_character_limit"], 72)
             self.assertEqual(payload["caption_max_lines"], 1)

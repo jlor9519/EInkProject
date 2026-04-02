@@ -37,6 +37,7 @@ DEFAULT_METADATA_FONT_SIZE = 14
 DEFAULT_CAPTION_FONT_SIZE = 20
 DEFAULT_CAPTION_CHARACTER_LIMIT = 72
 DEFAULT_MAX_CAPTION_LINES = 1
+DEFAULT_EMOJI_FONT_PATH = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
 
 
 def load_config(config_path: str | Path | None = None) -> AppConfig:
@@ -128,6 +129,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         background_color=str(display_section.get("background_color", "#F7F3EA")),
         text_color=str(display_section.get("text_color", "#111111")),
         divider_color=str(display_section.get("divider_color", "#3A3A3A")),
+        emoji_font_path=str(display_section.get("emoji_font_path", DEFAULT_EMOJI_FONT_PATH)),
     )
     if display_config.caption_height >= display_config.height:
         errors.append("display.caption_height must be smaller than display.height.")

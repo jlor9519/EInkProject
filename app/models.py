@@ -47,6 +47,7 @@ class DisplayConfig:
     background_color: str
     text_color: str
     divider_color: str
+    emoji_font_path: str = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
 
 
 @dataclass(slots=True)

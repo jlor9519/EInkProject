@@ -44,6 +44,7 @@ class ConfigTests(unittest.TestCase):
                             "caption_font_size": 26,
                             "max_caption_lines": 2,
                             "font_path": "/tmp/does-not-exist.ttf",
+                            "emoji_font_path": "/tmp/emoji.ttf",
                             "background_color": "#FFFFFF",
                             "text_color": "#000000",
                             "divider_color": "#333333",
@@ -78,6 +79,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.inkypi.update_now_url, "http://127.0.0.1/update_now")
             self.assertEqual(config.inkypi.waveshare_model, "epd7in3e")
             self.assertEqual(config.display.caption_character_limit, 72)
+            self.assertEqual(config.display.emoji_font_path, "/tmp/emoji.ttf")
 
     def test_missing_telegram_token_raises_error(self) -> None:
         if find_spec("yaml") is None or find_spec("dotenv") is None:
@@ -273,6 +275,67 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(config.inkypi.update_method, "http_update_now")
             self.assertEqual(config.inkypi.update_now_url, "http://127.0.0.1/update_now")
+
+    def test_load_config_uses_default_emoji_font_path_when_omitted(self) -> None:
+        if find_spec("yaml") is None or find_spec("dotenv") is None:
+            self.skipTest("PyYAML and python-dotenv are required for config tests.")
+
+        import yaml
+
+        from app.config import DEFAULT_EMOJI_FONT_PATH, load_config
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "telegram": {"bot_token_env": "TEST_TELEGRAM_BOT_TOKEN"},
+                        "security": {},
+                        "database": {"path": "data/db/test.db"},
+                        "storage": {
+                            "incoming_dir": "data/incoming",
+                            "rendered_dir": "data/rendered",
+                            "cache_dir": "data/cache",
+                            "archive_dir": "data/archive",
+                            "inkypi_payload_dir": "data/inkypi",
+                            "current_payload_path": "data/inkypi/current.json",
+                            "current_image_path": "data/inkypi/current.png",
+                            "keep_recent_rendered": 3,
+                        },
+                        "display": {
+                            "width": 800,
+                            "height": 480,
+                            "caption_height": 44,
+                            "margin": 12,
+                            "metadata_font_size": 20,
+                            "caption_font_size": 26,
+                            "max_caption_lines": 1,
+                            "font_path": "/tmp/does-not-exist.ttf",
+                            "background_color": "#FFFFFF",
+                            "text_color": "#000000",
+                            "divider_color": "#333333",
+                        },
+                        "inkypi": {
+                            "repo_path": "~/InkyPi",
+                            "install_path": "/usr/local/inkypi",
+                            "validated_commit": "main",
+                            "waveshare_model": "epd7in3e",
+                            "plugin_id": "telegram_frame",
+                            "payload_dir": "data/inkypi",
+                            "refresh_command": "echo refresh",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            os.environ["TEST_TELEGRAM_BOT_TOKEN"] = "token-123"
+            try:
+                config = load_config(config_path)
+            finally:
+                os.environ.pop("TEST_TELEGRAM_BOT_TOKEN", None)
+
+            self.assertEqual(config.display.emoji_font_path, DEFAULT_EMOJI_FONT_PATH)
 
     def test_load_config_migrates_legacy_large_caption_defaults_to_compact_bar(self) -> None:
         if find_spec("yaml") is None or find_spec("dotenv") is None:

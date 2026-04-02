@@ -415,6 +415,7 @@ class InkyPiAdapter:
         payload["caption_text_color"] = self.display_config.text_color
         payload["caption_background_color"] = "#FFFFFF"
         payload["font_path"] = self.display_config.font_path
+        payload["emoji_font_path"] = self.display_config.emoji_font_path
         payload["image_fit_mode"] = request.fit_mode
         payload["revision"] = self._revision_hash(payload)
 

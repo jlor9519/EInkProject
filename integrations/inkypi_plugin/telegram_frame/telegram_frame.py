@@ -7,15 +7,18 @@ from pathlib import Path
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
 from plugins.base_plugin.base_plugin import BasePlugin
 
-# Characters DejaVuSans cannot render: emoji, pictographs, variation selectors, ZWJ
-_UNSUPPORTED_RE = re.compile(
+_EMOJI_RUN_RE = re.compile(
+    "(?:"
+    "[0-9#*]\uFE0F?\u20E3"
+    "|"
     "["
     "\U0001F100-\U0001FFFF"  # All SMP emoji / symbols (emoticons, transport, nature, …)
     "\U00002600-\U000027BF"  # BMP misc symbols & dingbats
     "\U0000FE00-\U0000FE0F"  # Variation selectors (modify preceding emoji)
     "\U0000200D"             # Zero-width joiner (emoji sequence connector)
     "\U000020E3"             # Combining enclosing keycap
-    "]+",
+    "]+"
+    ")",
     flags=re.UNICODE,
 )
 
@@ -78,6 +81,7 @@ class TelegramFrame(BasePlugin):
                 ),
                 caption_margin=self._safe_int(payload.get("caption_margin"), DEFAULT_CAPTION_MARGIN),
                 font_path=str(payload.get("font_path") or ""),
+                emoji_font_path=str(payload.get("emoji_font_path") or ""),
                 caption_text_color=str(payload.get("caption_text_color") or DEFAULT_CAPTION_TEXT_COLOR),
                 caption_background_color=str(payload.get("caption_background_color") or DEFAULT_CAPTION_BACKGROUND_COLOR),
                 fit_mode=str(payload.get("image_fit_mode") or "fill"),
@@ -101,6 +105,7 @@ class TelegramFrame(BasePlugin):
         caption_character_limit: int,
         caption_margin: int,
         font_path: str,
+        emoji_font_path: str,
         caption_text_color: str,
         caption_background_color: str,
         fit_mode: str = "fill",
@@ -143,10 +148,13 @@ class TelegramFrame(BasePlugin):
 
         caption_font = self._load_font(font_path, caption_font_size)
         metadata_font = self._load_font(font_path, metadata_font_size)
+        emoji_caption_font = self._load_emoji_font(emoji_font_path, caption_font_size, caption_font)
+        emoji_metadata_font = self._load_emoji_font(emoji_font_path, metadata_font_size, metadata_font)
         text_color = ImageColor.getrgb(caption_text_color)
         metadata_lines = self._prepare_metadata_lines(
             draw,
             metadata_font,
+            emoji_metadata_font,
             taken_at=self._normalize_text(taken_at),
             location=self._normalize_text(location),
             max_block_width=self._max_metadata_block_width(width, caption_margin),
@@ -160,19 +168,16 @@ class TelegramFrame(BasePlugin):
             draw,
             self._truncate_characters(self._normalize_text(caption), caption_character_limit),
             caption_font,
+            emoji_caption_font,
             caption_available_width,
         )
 
         if text:
-            text_bbox = draw.textbbox((0, 0), text, font=caption_font)
-            text_height = text_bbox[3] - text_bbox[1]
-            text_y = bar_top + max(0, (caption_bar_height - text_height) // 2) - text_bbox[1]
-            draw.text(
-                (caption_margin, text_y),
-                text,
-                font=caption_font,
-                fill=text_color,
-            )
+            runs = self._split_text_runs(text, caption_font, emoji_caption_font)
+            _, text_top, text_bottom = self._measure_runs(draw, runs)
+            text_height = text_bottom - text_top
+            text_y = bar_top + max(0, (caption_bar_height - text_height) // 2) - text_top
+            self._draw_text_runs(draw, caption_margin, text_y, runs, fill=text_color)
 
         if metadata_lines:
             self._draw_metadata_block(
@@ -202,11 +207,25 @@ class TelegramFrame(BasePlugin):
                 pass
         return ImageFont.load_default()
 
+    def _load_emoji_font(
+        self,
+        emoji_font_path: str,
+        size: int,
+        fallback_font: ImageFont.ImageFont,
+    ) -> ImageFont.ImageFont:
+        if emoji_font_path:
+            try:
+                return ImageFont.truetype(emoji_font_path, size=size)
+            except OSError:
+                pass
+        return fallback_font
+
     def _truncate_line(
         self,
         draw: ImageDraw.ImageDraw,
         text: str,
         font: ImageFont.ImageFont,
+        emoji_font: ImageFont.ImageFont,
         max_width: int,
     ) -> str:
         if not text:
@@ -214,15 +233,110 @@ class TelegramFrame(BasePlugin):
 
         candidate = " ".join(text.split())
         ellipsis = "..."
-        while candidate and draw.textlength(candidate, font=font) > max_width:
-            if draw.textlength(candidate + ellipsis, font=font) <= max_width:
+        while candidate and self._measure_text(draw, candidate, font, emoji_font) > max_width:
+            if self._measure_text(draw, candidate + ellipsis, font, emoji_font) <= max_width:
                 return candidate + ellipsis
             candidate = candidate[:-1].rstrip()
         return candidate or ellipsis
 
     def _normalize_text(self, text: str) -> str:
-        stripped = _UNSUPPORTED_RE.sub("", str(text or ""))
-        return " ".join(stripped.split())
+        return " ".join(str(text or "").split())
+
+    def _split_text_runs(
+        self,
+        text: str,
+        font: ImageFont.ImageFont,
+        emoji_font: ImageFont.ImageFont,
+    ) -> list[dict[str, object]]:
+        if not text:
+            return []
+
+        runs: list[dict[str, object]] = []
+        cursor = 0
+        use_color_emoji = emoji_font is not font
+        for match in _EMOJI_RUN_RE.finditer(text):
+            if match.start() > cursor:
+                runs.append({"text": text[cursor:match.start()], "font": font, "embedded_color": False})
+            runs.append(
+                {
+                    "text": match.group(0),
+                    "font": emoji_font if use_color_emoji else font,
+                    "embedded_color": use_color_emoji,
+                }
+            )
+            cursor = match.end()
+        if cursor < len(text):
+            runs.append({"text": text[cursor:], "font": font, "embedded_color": False})
+        return [run for run in runs if run["text"]]
+
+    def _measure_text(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        font: ImageFont.ImageFont,
+        emoji_font: ImageFont.ImageFont,
+    ) -> float:
+        runs = self._split_text_runs(text, font, emoji_font)
+        width, _, _ = self._measure_runs(draw, runs)
+        return width
+
+    def _measure_runs(
+        self,
+        draw: ImageDraw.ImageDraw,
+        runs: list[dict[str, object]],
+    ) -> tuple[float, int, int]:
+        total_width = 0.0
+        top = 0
+        bottom = 0
+        seen = False
+        for run in runs:
+            bbox = draw.textbbox(
+                (0, 0),
+                str(run["text"]),
+                font=run["font"],
+                embedded_color=bool(run["embedded_color"]),
+            )
+            total_width += float(
+                draw.textlength(
+                    str(run["text"]),
+                    font=run["font"],
+                    embedded_color=bool(run["embedded_color"]),
+                )
+            )
+            if not seen:
+                top = bbox[1]
+                bottom = bbox[3]
+                seen = True
+            else:
+                top = min(top, bbox[1])
+                bottom = max(bottom, bbox[3])
+        return total_width, top, bottom
+
+    def _draw_text_runs(
+        self,
+        draw: ImageDraw.ImageDraw,
+        x: int,
+        y: int,
+        runs: list[dict[str, object]],
+        *,
+        fill: tuple[int, int, int],
+    ) -> None:
+        current_x = float(x)
+        for run in runs:
+            draw.text(
+                (current_x, y),
+                str(run["text"]),
+                font=run["font"],
+                fill=fill,
+                embedded_color=bool(run["embedded_color"]),
+            )
+            current_x += float(
+                draw.textlength(
+                    str(run["text"]),
+                    font=run["font"],
+                    embedded_color=bool(run["embedded_color"]),
+                )
+            )
 
     def _truncate_characters(self, text: str, limit: int) -> str:
         if not text or limit <= 0 or len(text) <= limit:
@@ -240,6 +354,7 @@ class TelegramFrame(BasePlugin):
         self,
         draw: ImageDraw.ImageDraw,
         font: ImageFont.ImageFont,
+        emoji_font: ImageFont.ImageFont,
         *,
         taken_at: str,
         location: str,
@@ -254,22 +369,22 @@ class TelegramFrame(BasePlugin):
                 continue
             icon_size = self._icon_size(font)
             max_text_width = max(1, max_block_width - icon_size - DEFAULT_ICON_TEXT_GAP)
-            truncated_text = self._truncate_line(draw, text, font, max_text_width)
+            truncated_text = self._truncate_line(draw, text, font, emoji_font, max_text_width)
             if not truncated_text:
                 continue
-            text_bbox = draw.textbbox((0, 0), truncated_text, font=font)
-            text_width = max(0, text_bbox[2] - text_bbox[0])
-            text_height = max(0, text_bbox[3] - text_bbox[1])
+            runs = self._split_text_runs(truncated_text, font, emoji_font)
+            text_width, text_top, text_bottom = self._measure_runs(draw, runs)
+            text_height = max(0, text_bottom - text_top)
             line_height = max(icon_size, text_height)
             lines.append(
                 {
                     "kind": kind,
-                    "text": truncated_text,
-                    "font": font,
+                    "runs": runs,
                     "icon_size": icon_size,
-                    "width": icon_size + DEFAULT_ICON_TEXT_GAP + text_width,
+                    "width": icon_size + DEFAULT_ICON_TEXT_GAP + int(round(text_width)),
                     "height": line_height,
-                    "text_bbox": text_bbox,
+                    "text_top": text_top,
+                    "text_bottom": text_bottom,
                 }
             )
         return lines
@@ -294,9 +409,7 @@ class TelegramFrame(BasePlugin):
             line_width = int(line["width"])
             line_height = int(line["height"])
             icon_size = int(line["icon_size"])
-            font = line["font"]
-            text_bbox = line["text_bbox"]
-            text = str(line["text"])
+            runs = list(line["runs"])
 
             line_x = width - caption_margin - line_width
             icon_y = current_y + max(0, (line_height - icon_size) // 2)
@@ -306,9 +419,9 @@ class TelegramFrame(BasePlugin):
                 self._draw_location_icon(draw, line_x, icon_y, icon_size, text_color, background_color)
 
             text_x = line_x + icon_size + DEFAULT_ICON_TEXT_GAP
-            text_height = text_bbox[3] - text_bbox[1]
-            text_y = current_y + max(0, (line_height - text_height) // 2) - text_bbox[1]
-            draw.text((text_x, text_y), text, font=font, fill=text_color)
+            text_height = int(line["text_bottom"]) - int(line["text_top"])
+            text_y = current_y + max(0, (line_height - text_height) // 2) - int(line["text_top"])
+            self._draw_text_runs(draw, text_x, text_y, runs, fill=text_color)
             current_y += line_height + DEFAULT_METADATA_LINE_GAP
 
     def _draw_calendar_icon(
