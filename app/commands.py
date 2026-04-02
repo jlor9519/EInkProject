@@ -110,8 +110,8 @@ def _build_help_text(is_admin: bool) -> str:
         lines.extend(
             [
                 "/settings - Anzeigeeinstellungen anzeigen/ändern",
-                "/users - freigegebene Nutzer anzeigen",
-                "/unwhitelist - Nutzer entfernen",
+                #"/users - freigegebene Nutzer anzeigen",
+                #"/unwhitelist - Nutzer entfernen",
             ]
         )
     return "\n".join(lines)
