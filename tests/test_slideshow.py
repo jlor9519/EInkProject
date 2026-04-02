@@ -8,11 +8,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.error import URLError
 from zoneinfo import ZoneInfo
 
 from app.commands import list_command
 from app.database import Database
-from app.models import DisplayResult, ImageRecord
+from app.inkypi_adapter import InkyPiAdapter
+from app.models import DisplayConfig, DisplayResult, ImageRecord, InkyPiConfig, StorageConfig
 from app.slideshow import _advance_slideshow, compute_next_fire_decision, project_display_change_offsets
 
 
@@ -120,6 +122,29 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
 
             self.assert_future_timestamp(services.database.get_setting("slideshow_next_fire_at"))
             self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
+
+    async def test_repeated_display_error_retries_keep_current_payload_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services_with_real_adapter(tmpdir_path, interval_seconds=7200)
+            _seed_displayed_images(tmpdir_path, services, ["img-1", "img-2"])
+            context = _JobContext(services)
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=URLError(ConnectionRefusedError(111, "Connection refused")),
+            ):
+                await _advance_slideshow(context)
+                await _advance_slideshow(context)
+
+            payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-1")
+            self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
+
+            update = _MessageUpdate()
+            command_context = _CommandContext(services)
+            await list_command(update, command_context)
+            self.assertIn('"img-1"', update.effective_message.replies[0])
 
     async def test_auto_advance_ignores_images_hidden_by_rotation_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -328,6 +353,59 @@ def _build_services(base_dir: Path, *, interval_seconds: int):
                 current_payload_path=payload_path,
                 current_image_path=current_image_path,
             )
+        ),
+    )
+
+
+def _build_services_with_real_adapter(base_dir: Path, *, interval_seconds: int):
+    database = Database(base_dir / "photo_frame.db")
+    database.initialize()
+    storage_config = StorageConfig(
+        incoming_dir=base_dir / "incoming",
+        rendered_dir=base_dir / "rendered",
+        cache_dir=base_dir / "cache",
+        archive_dir=base_dir / "archive",
+        inkypi_payload_dir=base_dir / "inkypi",
+        current_payload_path=base_dir / "inkypi" / "current.json",
+        current_image_path=base_dir / "inkypi" / "current.png",
+        keep_recent_rendered=5,
+    )
+    display_config = DisplayConfig(
+        width=800,
+        height=480,
+        caption_height=44,
+        margin=18,
+        metadata_font_size=14,
+        caption_font_size=20,
+        caption_character_limit=72,
+        max_caption_lines=1,
+        font_path="/tmp/does-not-exist.ttf",
+        background_color="#F7F3EA",
+        text_color="#111111",
+        divider_color="#3A3A3A",
+    )
+    inkypi_config = InkyPiConfig(
+        repo_path=base_dir / "InkyPi",
+        install_path=base_dir / "usr" / "local" / "inkypi",
+        validated_commit="main",
+        waveshare_model="epd7in3e",
+        plugin_id="telegram_frame",
+        payload_dir=base_dir / "inkypi",
+        update_method="http_update_now",
+        update_now_url="http://127.0.0.1/update_now",
+        refresh_command="echo refresh",
+    )
+    device_config_path = base_dir / "InkyPi" / "src" / "config" / "device.json"
+    device_config_path.parent.mkdir(parents=True, exist_ok=True)
+    device_config_path.write_text(json.dumps({"orientation": "horizontal"}), encoding="utf-8")
+    return SimpleNamespace(
+        auth=_FakeAuth(),
+        database=database,
+        display=InkyPiAdapter(inkypi_config, storage_config, display_config, database=database),
+        storage=_FakeStorage(base_dir),
+        renderer=_FakeRenderer(),
+        config=SimpleNamespace(
+            storage=storage_config,
         ),
     )
 

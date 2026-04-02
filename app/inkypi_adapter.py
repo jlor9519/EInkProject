@@ -79,12 +79,29 @@ class InkyPiAdapter:
         self._systemctl_bin = shutil.which("systemctl") or "/usr/bin/systemctl"
 
     def display(self, request: DisplayRequest) -> DisplayResult:
-        logger.info("Writing bridge payload for image %s", request.image_id)
-        payload_path = self._write_bridge_payload(request)
-        result = self._trigger_display_update(payload_path)
-        result.payload_path = payload_path
-        logger.info("Display result for %s: success=%s", request.image_id, result.success)
-        return result
+        logger.info("Preparing staged bridge payload for image %s", request.image_id)
+        staged_payload_path: Path | None = None
+        staged_image_path: Path | None = None
+        try:
+            staged_payload_path, staged_image_path = self._prepare_staged_display(request)
+            result = self._trigger_display_update(
+                staged_payload_path,
+                image_path=staged_image_path,
+                plugin_payload_path=self.storage.current_payload_path,
+            )
+            if result.success:
+                self._commit_display_state(request, staged_image_path)
+                staged_image_path = None
+                result.payload_path = self.storage.current_payload_path
+            else:
+                result.payload_path = staged_payload_path
+            logger.info("Display result for %s: success=%s", request.image_id, result.success)
+            return result
+        finally:
+            if staged_payload_path is not None:
+                self._safe_unlink(staged_payload_path)
+            if staged_image_path is not None:
+                self._safe_unlink(staged_image_path)
 
     def read_device_settings(self) -> dict[str, object]:
         path = self._device_config_path()
@@ -260,7 +277,13 @@ class InkyPiAdapter:
             return service_error
         return self._wait_for_inkypi_http_ready()
 
-    def _trigger_display_update(self, payload_path: Path) -> DisplayResult:
+    def _trigger_display_update(
+        self,
+        payload_path: Path,
+        *,
+        image_path: Path | None = None,
+        plugin_payload_path: Path | None = None,
+    ) -> DisplayResult:
         try:
             payload = self._load_payload(payload_path)
         except json.JSONDecodeError as exc:
@@ -269,7 +292,7 @@ class InkyPiAdapter:
         if payload is None:
             return DisplayResult(False, f"InkyPi payload does not exist: {payload_path}")
 
-        plugin_sync_result = self._sync_active_plugin_instance(payload_path)
+        plugin_sync_result = self._sync_active_plugin_instance(plugin_payload_path or payload_path)
         if plugin_sync_result is not None:
             return plugin_sync_result
 
@@ -277,7 +300,7 @@ class InkyPiAdapter:
             logger.info("Triggering display via HTTP POST to %s", self.config.update_now_url)
             return self._post_update_now(payload_path)
 
-        command = self._format_refresh_command(payload_path, self.storage.current_image_path)
+        command = self._format_refresh_command(payload_path, image_path or self.storage.current_image_path)
         logger.info("Triggering display via command: %s", command)
         try:
             completed = subprocess.run(
@@ -347,15 +370,40 @@ class InkyPiAdapter:
             return DisplayResult(True, text)
         return DisplayResult(True, "InkyPi update_now completed successfully")
 
-    def _write_bridge_payload(self, request: DisplayRequest) -> Path:
-        self.storage.inkypi_payload_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(request.composed_path, self.storage.current_image_path)
+    def _prepare_staged_display(self, request: DisplayRequest) -> tuple[Path, Path]:
+        staged_image_path = self._make_temp_path(self.storage.current_image_path)
+        staged_payload_path = self._make_temp_path(self.storage.current_payload_path)
+        staged_image_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(request.composed_path, staged_image_path)
+        self._write_bridge_payload(
+            request,
+            payload_path=staged_payload_path,
+            image_path=staged_image_path,
+        )
+        return staged_payload_path, staged_image_path
+
+    def _commit_display_state(self, request: DisplayRequest, staged_image_path: Path) -> None:
+        self.storage.current_image_path.parent.mkdir(parents=True, exist_ok=True)
+        staged_image_path.replace(self.storage.current_image_path)
+        self._write_bridge_payload(
+            request,
+            payload_path=self.storage.current_payload_path,
+            image_path=self.storage.current_image_path,
+        )
+
+    def _write_bridge_payload(
+        self,
+        request: DisplayRequest,
+        *,
+        payload_path: Path,
+        image_path: Path,
+    ) -> Path:
         orientation_hint = self.current_orientation()
 
         payload = request.to_payload()
-        payload["prepared_image_path"] = str(self.storage.current_image_path)
-        payload["bridge_image_path"] = str(self.storage.current_image_path)
-        payload["payload_path"] = str(self.storage.current_payload_path)
+        payload["prepared_image_path"] = str(image_path)
+        payload["bridge_image_path"] = str(image_path)
+        payload["payload_path"] = str(payload_path)
         payload["plugin_id"] = self.config.plugin_id
         payload["orientation_hint"] = orientation_hint
         payload["caption_bar_height"] = self.display_config.caption_height if request.show_caption else 0
@@ -370,18 +418,18 @@ class InkyPiAdapter:
         payload["image_fit_mode"] = request.fit_mode
         payload["revision"] = self._revision_hash(payload)
 
-        self.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             "w",
             encoding="utf-8",
-            dir=self.storage.current_payload_path.parent,
+            dir=payload_path.parent,
             delete=False,
         ) as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
             temp_path = Path(handle.name)
-        temp_path.replace(self.storage.current_payload_path)
-        return self.storage.current_payload_path
+        temp_path.replace(payload_path)
+        return payload_path
 
     def _revision_hash(self, payload: dict[str, object]) -> str:
         encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -748,6 +796,21 @@ class InkyPiAdapter:
             plugin_id=self.config.plugin_id,
         )
         return shlex.split(command)
+
+    @staticmethod
+    def _make_temp_path(target_path: Path) -> Path:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=target_path.parent, suffix=target_path.suffix, delete=False) as handle:
+            return Path(handle.name)
+
+    @staticmethod
+    def _safe_unlink(path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError:
+            logger.warning("Failed to clean up temporary file %s", path, exc_info=True)
 
     def _restart_inkypi_service(self) -> str | None:
         sudo_bin = shutil.which("sudo")

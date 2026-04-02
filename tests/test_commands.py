@@ -7,6 +7,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.error import URLError
 
 from app.commands import (
     _delete_cancel_callback,
@@ -20,7 +22,8 @@ from app.commands import (
     status_command,
 )
 from app.database import Database
-from app.models import DisplayResult, ImageRecord
+from app.inkypi_adapter import InkyPiAdapter
+from app.models import DisplayConfig, DisplayResult, ImageRecord, InkyPiConfig, StorageConfig
 
 
 class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -758,6 +761,68 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(services.display.display_calls[-1], "img-previous")
             self.assertEqual(update.effective_message.replies[-1], "Bild 1 von 2: img-previous")
 
+    async def test_failed_next_keeps_current_payload_and_list_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services_with_real_adapter(tmpdir_path)
+            _seed_real_adapter_image(tmpdir_path, services, "img-current", created_at="2026-03-18T12:00:00+00:00")
+            _seed_real_adapter_image(tmpdir_path, services, "img-next", created_at="2026-03-18T12:05:00+00:00")
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-current"}),
+                encoding="utf-8",
+            )
+            services.config.storage.current_image_path.write_bytes(b"img-current")
+
+            update_next = _MessageUpdate()
+            context = _FakeContext(services, with_job_queue=True)
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=URLError(ConnectionRefusedError(111, "Connection refused")),
+            ):
+                await next_command(update_next, context)
+
+            self.assertEqual(
+                update_next.effective_message.replies[-1],
+                "Display nicht erreichbar. Bitte prüfe die Verbindung zum Pi.",
+            )
+            payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-current")
+
+            update_list = _MessageUpdate()
+            await list_command(update_list, context)
+            self.assertIn('"img-current"', update_list.effective_message.replies[0])
+
+    async def test_failed_prev_keeps_current_payload_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services_with_real_adapter(tmpdir_path)
+            _seed_real_adapter_image(tmpdir_path, services, "img-prev", created_at="2026-03-18T11:55:00+00:00")
+            _seed_real_adapter_image(tmpdir_path, services, "img-current", created_at="2026-03-18T12:00:00+00:00")
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-current"}),
+                encoding="utf-8",
+            )
+            services.config.storage.current_image_path.write_bytes(b"img-current")
+
+            update = _MessageUpdate()
+            context = _FakeContext(services, with_job_queue=True)
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=URLError(ConnectionRefusedError(111, "Connection refused")),
+            ):
+                await prev_command(update, context)
+
+            self.assertEqual(
+                update.effective_message.replies[-1],
+                "Display nicht erreichbar. Bitte prüfe die Verbindung zum Pi.",
+            )
+            payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-current")
+
     async def test_help_command_adds_quick_actions_and_admin_settings_button(self) -> None:
         services = _build_services(Path(tempfile.mkdtemp()), is_admin=True)
         update = _MessageUpdate(user_id=5)
@@ -1106,6 +1171,90 @@ def _build_services(base_dir: Path, *, is_admin: bool = False):
                 current_image_path=base_dir / "inkypi" / "current.png",
             )
         ),
+    )
+
+
+class _CopyingRenderer:
+    def render(self, original_path: Path, output_path: Path, **_: object) -> Path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(Path(original_path).read_bytes())
+        return output_path
+
+
+def _build_services_with_real_adapter(base_dir: Path):
+    database = Database(base_dir / "photo_frame.db")
+    database.initialize()
+    storage_config = StorageConfig(
+        incoming_dir=base_dir / "incoming",
+        rendered_dir=base_dir / "rendered",
+        cache_dir=base_dir / "cache",
+        archive_dir=base_dir / "archive",
+        inkypi_payload_dir=base_dir / "inkypi",
+        current_payload_path=base_dir / "inkypi" / "current.json",
+        current_image_path=base_dir / "inkypi" / "current.png",
+        keep_recent_rendered=5,
+    )
+    display_config = DisplayConfig(
+        width=800,
+        height=480,
+        caption_height=44,
+        margin=18,
+        metadata_font_size=14,
+        caption_font_size=20,
+        caption_character_limit=72,
+        max_caption_lines=1,
+        font_path="/tmp/does-not-exist.ttf",
+        background_color="#F7F3EA",
+        text_color="#111111",
+        divider_color="#3A3A3A",
+    )
+    inkypi_config = InkyPiConfig(
+        repo_path=base_dir / "InkyPi",
+        install_path=base_dir / "usr" / "local" / "inkypi",
+        validated_commit="main",
+        waveshare_model="epd7in3e",
+        plugin_id="telegram_frame",
+        payload_dir=base_dir / "inkypi",
+        update_method="http_update_now",
+        update_now_url="http://127.0.0.1/update_now",
+        refresh_command="echo refresh",
+    )
+    device_config_path = base_dir / "InkyPi" / "src" / "config" / "device.json"
+    device_config_path.parent.mkdir(parents=True, exist_ok=True)
+    device_config_path.write_text(json.dumps({"orientation": "horizontal"}), encoding="utf-8")
+    return SimpleNamespace(
+        auth=_FakeAuth(),
+        database=database,
+        display=InkyPiAdapter(inkypi_config, storage_config, display_config, database=database),
+        storage=SimpleNamespace(
+            rendered_path=lambda image_id: base_dir / "rendered" / f"{image_id}.png",
+            healthcheck=lambda: True,
+        ),
+        renderer=_CopyingRenderer(),
+        config=SimpleNamespace(storage=storage_config),
+    )
+
+
+def _seed_real_adapter_image(base_dir: Path, services, image_id: str, *, created_at: str) -> None:
+    original = base_dir / "incoming" / f"{image_id}.jpg"
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_bytes(image_id.encode("utf-8"))
+    services.database.upsert_image(
+        ImageRecord(
+            image_id=image_id,
+            telegram_file_id=f"file-{image_id}",
+            telegram_chat_id=111,
+            local_original_path=str(original),
+            local_rendered_path=None,
+            location="",
+            taken_at="",
+            caption=image_id,
+            uploaded_by=1,
+            created_at=created_at,
+            status="displayed",
+            last_error=None,
+            orientation_bucket="horizontal",
+        )
     )
 
 

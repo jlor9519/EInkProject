@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -40,6 +41,92 @@ class _FakeCompletedProcess:
 
 
 class InkyPiAdapterTests(unittest.TestCase):
+    def test_failed_http_display_keeps_committed_current_files_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_image = tmpdir_path / "prepared.png"
+            Image.new("RGB", (900, 1600), (12, 34, 56)).save(source_image)
+
+            storage_config = self._build_storage(tmpdir_path)
+            display_config = self._build_display_config()
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            self._write_device_config(tmpdir_path, orientation="horizontal")
+            self._seed_committed_current(storage_config, image_id="img-old", image_bytes=b"old-display")
+            adapter = InkyPiAdapter(inkypi_config, storage_config, display_config)
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=URLError(ConnectionRefusedError(111, "Connection refused")),
+            ):
+                result = adapter.display(self._build_request(tmpdir_path, source_image))
+
+            self.assertFalse(result.success)
+            payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-old")
+            self.assertEqual(storage_config.current_image_path.read_bytes(), b"old-display")
+
+    def test_failed_command_display_keeps_committed_current_files_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_image = tmpdir_path / "prepared.png"
+            Image.new("RGB", (1600, 900), (12, 34, 56)).save(source_image)
+
+            storage_config = self._build_storage(tmpdir_path)
+            display_config = self._build_display_config()
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="command",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="echo refresh",
+            )
+            self._write_device_config(tmpdir_path, orientation="vertical")
+            self._seed_committed_current(storage_config, image_id="img-old", image_bytes=b"old-display")
+            adapter = InkyPiAdapter(inkypi_config, storage_config, display_config)
+
+            with patch(
+                "app.inkypi_adapter.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd=["echo", "refresh"], timeout=60),
+            ):
+                result = adapter.display(self._build_request(tmpdir_path, source_image))
+
+            self.assertFalse(result.success)
+            payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-old")
+            self.assertEqual(storage_config.current_image_path.read_bytes(), b"old-display")
+
+    def test_successful_display_commits_stable_current_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_image = tmpdir_path / "prepared.png"
+            Image.new("RGB", (900, 1600), (123, 111, 99)).save(source_image)
+
+            storage_config = self._build_storage(tmpdir_path)
+            display_config = self._build_display_config()
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            self._write_device_config(tmpdir_path, orientation="horizontal")
+            adapter = InkyPiAdapter(inkypi_config, storage_config, display_config)
+
+            with patch("app.inkypi_adapter.request.urlopen", return_value=_FakeHttpResponse('{"message":"ok"}')):
+                result = adapter.display(self._build_request(tmpdir_path, source_image))
+
+            self.assertTrue(result.success)
+            payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-1")
+            self.assertEqual(payload["prepared_image_path"], str(storage_config.current_image_path))
+            self.assertEqual(payload["bridge_image_path"], str(storage_config.current_image_path))
+            self.assertEqual(payload["payload_path"], str(storage_config.current_payload_path))
+            self.assertEqual(storage_config.current_image_path.read_bytes(), source_image.read_bytes())
+
     def test_display_writes_payload_without_overriding_selected_orientation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -691,6 +778,23 @@ class InkyPiAdapterTests(unittest.TestCase):
         if image_settings is not None:
             payload["image_settings"] = image_settings
         device_config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    @staticmethod
+    def _seed_committed_current(storage_config: StorageConfig, *, image_id: str, image_bytes: bytes) -> None:
+        storage_config.current_image_path.parent.mkdir(parents=True, exist_ok=True)
+        storage_config.current_image_path.write_bytes(image_bytes)
+        storage_config.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+        storage_config.current_payload_path.write_text(
+            json.dumps(
+                {
+                    "image_id": image_id,
+                    "prepared_image_path": str(storage_config.current_image_path),
+                    "bridge_image_path": str(storage_config.current_image_path),
+                    "payload_path": str(storage_config.current_payload_path),
+                }
+            ),
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":
