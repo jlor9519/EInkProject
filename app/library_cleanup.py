@@ -19,6 +19,7 @@ def clear_all_images(
     database: Database,
     current_payload_path: Path,
     current_image_path: Path,
+    committed_artifacts_dir: Path | None = None,
 ) -> CleanupSummary:
     records = database.get_images_excluding(None)
 
@@ -45,6 +46,22 @@ def clear_all_images(
             deleted_files += 1
             deleted_paths.add(path)
 
+    if committed_artifacts_dir is not None and committed_artifacts_dir.exists():
+        for path in sorted(committed_artifacts_dir.glob("**/*"), reverse=True):
+            if path.is_file():
+                existed = safe_unlink(path)
+                if existed:
+                    deleted_files += 1
+            elif path.is_dir():
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
+        try:
+            committed_artifacts_dir.rmdir()
+        except OSError:
+            pass
+
     return CleanupSummary(
         deleted_images=len(records),
         deleted_files=deleted_files,
@@ -66,6 +83,7 @@ def main() -> None:
         database,
         config.storage.current_payload_path,
         config.storage.current_image_path,
+        config.storage.inkypi_payload_dir / "committed",
     )
     print(
         f"Cleared {summary.deleted_images} image record(s) and removed {summary.deleted_files} file(s)."

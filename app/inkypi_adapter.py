@@ -29,6 +29,8 @@ INKYPI_SERVICE_NAME = "inkypi.service"
 INKYPI_RESTART_TIMEOUT_SECONDS = 45
 INKYPI_HTTP_READY_TIMEOUT_SECONDS = 30
 DEFAULT_TELEGRAM_FRAME_INSTANCE_NAME = "Telegram Frame"
+COMMITTED_ARTIFACT_DIR_NAME = "committed"
+COMMITTED_ARTIFACT_RETENTION = 5
 RUNTIME_CACHE_ORIENTATION_KEY = "runtime_cache_orientation"
 RUNTIME_CACHE_INTERVAL_KEY = "runtime_cache_slideshow_interval"
 RUNTIME_CACHE_SLEEP_SCHEDULE_KEY = "runtime_cache_sleep_schedule"
@@ -383,13 +385,18 @@ class InkyPiAdapter:
         return staged_payload_path, staged_image_path
 
     def _commit_display_state(self, request: DisplayRequest, staged_image_path: Path) -> None:
+        committed_image_path = self._committed_image_path(request)
+        committed_image_path.parent.mkdir(parents=True, exist_ok=True)
+        staged_image_path.replace(committed_image_path)
         self.storage.current_image_path.parent.mkdir(parents=True, exist_ok=True)
-        staged_image_path.replace(self.storage.current_image_path)
+        shutil.copy2(committed_image_path, self.storage.current_image_path)
         self._write_bridge_payload(
             request,
             payload_path=self.storage.current_payload_path,
-            image_path=self.storage.current_image_path,
+            image_path=committed_image_path,
+            bridge_image_path=self.storage.current_image_path,
         )
+        self._cleanup_old_committed_images(keep_path=committed_image_path)
 
     def _write_bridge_payload(
         self,
@@ -397,12 +404,13 @@ class InkyPiAdapter:
         *,
         payload_path: Path,
         image_path: Path,
+        bridge_image_path: Path | None = None,
     ) -> Path:
         orientation_hint = self.current_orientation()
 
         payload = request.to_payload()
         payload["prepared_image_path"] = str(image_path)
-        payload["bridge_image_path"] = str(image_path)
+        payload["bridge_image_path"] = str(bridge_image_path or image_path)
         payload["payload_path"] = str(payload_path)
         payload["plugin_id"] = self.config.plugin_id
         payload["orientation_hint"] = orientation_hint
@@ -796,6 +804,48 @@ class InkyPiAdapter:
             plugin_id=self.config.plugin_id,
         )
         return shlex.split(command)
+
+    def _committed_image_path(self, request: DisplayRequest) -> Path:
+        return self._committed_images_dir() / f"{request.image_id}_{self._revision_hash(request.to_payload())}.png"
+
+    def _committed_images_dir(self) -> Path:
+        return self.storage.inkypi_payload_dir / COMMITTED_ARTIFACT_DIR_NAME
+
+    def _cleanup_old_committed_images(self, *, keep_path: Path) -> None:
+        committed_dir = self._committed_images_dir()
+        if not committed_dir.exists():
+            return
+        current_prepared = self._read_current_prepared_image_path()
+        candidates = sorted(
+            (path for path in committed_dir.glob("*.png") if path.is_file()),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        retained = 0
+        for candidate in candidates:
+            if candidate == keep_path or candidate == current_prepared:
+                retained += 1
+                continue
+            if retained < COMMITTED_ARTIFACT_RETENTION:
+                retained += 1
+                continue
+            self._safe_unlink(candidate)
+
+    def _read_current_prepared_image_path(self) -> Path | None:
+        try:
+            payload = self._load_payload(self.storage.current_payload_path)
+        except (json.JSONDecodeError, OSError):
+            logger.warning(
+                "Could not read current payload while cleaning committed display artifacts",
+                exc_info=True,
+            )
+            return None
+        if payload is None:
+            return None
+        prepared = payload.get("prepared_image_path")
+        if not prepared:
+            return None
+        return Path(str(prepared))
 
     @staticmethod
     def _make_temp_path(target_path: Path) -> Path:

@@ -122,10 +122,98 @@ class InkyPiAdapterTests(unittest.TestCase):
             self.assertTrue(result.success)
             payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["image_id"], "img-1")
-            self.assertEqual(payload["prepared_image_path"], str(storage_config.current_image_path))
+            prepared_image_path = Path(payload["prepared_image_path"])
+            self.assertNotEqual(prepared_image_path, storage_config.current_image_path)
+            self.assertTrue(prepared_image_path.exists())
+            self.assertEqual(prepared_image_path.parent, storage_config.inkypi_payload_dir / "committed")
             self.assertEqual(payload["bridge_image_path"], str(storage_config.current_image_path))
             self.assertEqual(payload["payload_path"], str(storage_config.current_payload_path))
             self.assertEqual(storage_config.current_image_path.read_bytes(), source_image.read_bytes())
+            self.assertEqual(prepared_image_path.read_bytes(), source_image.read_bytes())
+
+    def test_successive_displays_keep_older_payload_image_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            first_image = tmpdir_path / "first.png"
+            second_image = tmpdir_path / "second.png"
+            Image.new("RGB", (900, 1600), (123, 111, 99)).save(first_image)
+            Image.new("RGB", (900, 1600), (11, 22, 33)).save(second_image)
+
+            storage_config = self._build_storage(tmpdir_path)
+            display_config = self._build_display_config()
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            self._write_device_config(tmpdir_path, orientation="horizontal")
+            adapter = InkyPiAdapter(inkypi_config, storage_config, display_config)
+
+            with patch("app.inkypi_adapter.request.urlopen", return_value=_FakeHttpResponse('{"message":"ok"}')):
+                adapter.display(self._build_request(tmpdir_path, first_image))
+            first_payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
+            first_prepared_path = Path(first_payload["prepared_image_path"])
+            first_bytes = first_prepared_path.read_bytes()
+
+            second_request = DisplayRequest(
+                image_id="img-2",
+                original_path=tmpdir_path / "original-2.jpg",
+                composed_path=second_image,
+                location="Rome",
+                taken_at="2026-03-19",
+                caption="Second",
+                created_at="2026-03-19T12:00:00+00:00",
+                uploaded_by=1,
+            )
+            with patch("app.inkypi_adapter.request.urlopen", return_value=_FakeHttpResponse('{"message":"ok"}')):
+                adapter.display(second_request)
+
+            second_payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
+            second_prepared_path = Path(second_payload["prepared_image_path"])
+            self.assertNotEqual(first_prepared_path, second_prepared_path)
+            self.assertEqual(first_prepared_path.read_bytes(), first_bytes)
+            self.assertEqual(second_prepared_path.read_bytes(), second_image.read_bytes())
+            self.assertEqual(storage_config.current_image_path.read_bytes(), second_image.read_bytes())
+
+    def test_successive_displays_keep_small_committed_retention_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            storage_config = self._build_storage(tmpdir_path)
+            display_config = self._build_display_config()
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            self._write_device_config(tmpdir_path, orientation="horizontal")
+            adapter = InkyPiAdapter(inkypi_config, storage_config, display_config)
+
+            for index in range(7):
+                source_image = tmpdir_path / f"image-{index}.png"
+                Image.new("RGB", (900, 1600), (index * 10, index * 10, index * 10)).save(source_image)
+                request = DisplayRequest(
+                    image_id=f"img-{index}",
+                    original_path=tmpdir_path / f"original-{index}.jpg",
+                    composed_path=source_image,
+                    location="Berlin",
+                    taken_at=f"2026-03-{18 + index:02d}",
+                    caption=f"Caption {index}",
+                    created_at="2026-03-18T12:00:00+00:00",
+                    uploaded_by=1,
+                )
+                with patch("app.inkypi_adapter.request.urlopen", return_value=_FakeHttpResponse('{"message":"ok"}')):
+                    result = adapter.display(request)
+                self.assertTrue(result.success)
+
+            committed_files = sorted((storage_config.inkypi_payload_dir / "committed").glob("*.png"))
+            self.assertEqual(len(committed_files), 5)
+            current_payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                Path(current_payload["prepared_image_path"]),
+                committed_files[-1],
+            )
 
     def test_display_writes_payload_without_overriding_selected_orientation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -150,7 +238,7 @@ class InkyPiAdapterTests(unittest.TestCase):
             self.assertTrue(result.success)
             payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["orientation_hint"], "horizontal")
-            self.assertEqual(payload["prepared_image_path"], str(storage_config.current_image_path))
+            self.assertNotEqual(payload["prepared_image_path"], str(storage_config.current_image_path))
             self.assertEqual(payload["caption_bar_height"], 44)
             self.assertEqual(payload["caption_character_limit"], 72)
             self.assertEqual(payload["caption_max_lines"], 1)
@@ -781,14 +869,18 @@ class InkyPiAdapterTests(unittest.TestCase):
 
     @staticmethod
     def _seed_committed_current(storage_config: StorageConfig, *, image_id: str, image_bytes: bytes) -> None:
+        committed_dir = storage_config.inkypi_payload_dir / "committed"
+        committed_dir.mkdir(parents=True, exist_ok=True)
+        committed_path = committed_dir / f"{image_id}_seed.png"
         storage_config.current_image_path.parent.mkdir(parents=True, exist_ok=True)
         storage_config.current_image_path.write_bytes(image_bytes)
+        committed_path.write_bytes(image_bytes)
         storage_config.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
         storage_config.current_payload_path.write_text(
             json.dumps(
                 {
                     "image_id": image_id,
-                    "prepared_image_path": str(storage_config.current_image_path),
+                    "prepared_image_path": str(committed_path),
                     "bridge_image_path": str(storage_config.current_image_path),
                     "payload_path": str(storage_config.current_payload_path),
                 }

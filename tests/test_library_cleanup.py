@@ -19,9 +19,13 @@ class LibraryCleanupTests(unittest.TestCase):
 
             payload_path = tmpdir_path / "inkypi" / "current.json"
             current_image_path = tmpdir_path / "inkypi" / "current.png"
+            committed_dir = tmpdir_path / "inkypi" / "committed"
             payload_path.parent.mkdir(parents=True, exist_ok=True)
             payload_path.write_text(json.dumps({"image_id": "img-current"}), encoding="utf-8")
             current_image_path.write_bytes(b"current-payload-image")
+            committed_dir.mkdir(parents=True, exist_ok=True)
+            (committed_dir / "img-current_a.png").write_bytes(b"committed-a")
+            (committed_dir / "img-old_b.png").write_bytes(b"committed-b")
 
             current_original = tmpdir_path / "incoming" / "img-current.jpg"
             current_rendered = tmpdir_path / "rendered" / "img-current.png"
@@ -66,10 +70,10 @@ class LibraryCleanupTests(unittest.TestCase):
                 )
             )
 
-            summary = clear_all_images(database, payload_path, current_image_path)
+            summary = clear_all_images(database, payload_path, current_image_path, committed_dir)
 
             self.assertEqual(summary.deleted_images, 2)
-            self.assertEqual(summary.deleted_files, 6)
+            self.assertEqual(summary.deleted_files, 8)
             self.assertIsNone(database.get_image_by_id("img-current"))
             self.assertIsNone(database.get_image_by_id("img-old"))
             self.assertFalse(current_original.exists())
@@ -78,6 +82,9 @@ class LibraryCleanupTests(unittest.TestCase):
             self.assertFalse(old_rendered.exists())
             self.assertFalse(payload_path.exists())
             self.assertFalse(current_image_path.exists())
+            self.assertFalse((committed_dir / "img-current_a.png").exists())
+            self.assertFalse((committed_dir / "img-old_b.png").exists())
+            self.assertFalse(committed_dir.exists())
 
 
 if __name__ == "__main__":

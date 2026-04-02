@@ -288,6 +288,40 @@ class InkyPiSetupTests(unittest.TestCase):
 
             self.assertEqual(generated.size, (800, 480))
 
+    def test_plugin_prefers_prepared_image_path_over_bridge_image_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_root = tmpdir_path / "src"
+            self._prepare_plugin_import_tree(source_root)
+
+            prepared_image = tmpdir_path / "prepared.png"
+            bridge_image = tmpdir_path / "bridge.png"
+            payload_path = tmpdir_path / "payload.json"
+            from PIL import Image
+
+            Image.new("RGB", (1600, 600), (210, 120, 70)).save(prepared_image)
+            Image.new("RGB", (1600, 600), (10, 20, 30)).save(bridge_image)
+            payload_path.write_text(
+                json.dumps(
+                    {
+                        "prepared_image_path": str(prepared_image),
+                        "bridge_image_path": str(bridge_image),
+                        "caption": "Prepared wins",
+                        "caption_bar_height": 44,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plugin_class = self._import_plugin_class(source_root)
+            plugin = plugin_class()
+            generated = plugin.generate_image(
+                {"payload_path": str(payload_path)},
+                _FakeDeviceConfig("horizontal", (800, 480)),
+            )
+
+            self.assertEqual(generated.getpixel((10, 10)), (210, 120, 70))
+
     def _prepare_plugin_import_tree(self, source_root: Path) -> None:
         plugin_root = source_root / "plugins"
         base_plugin_dir = plugin_root / "base_plugin"
