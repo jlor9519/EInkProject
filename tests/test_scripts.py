@@ -31,7 +31,6 @@ class ScriptTests(unittest.TestCase):
         install_text = (PROJECT_ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
         self.assertIn("prompt_value", install_text)
         self.assertIn("setup_inkypi.sh", install_text)
-        self.assertIn("fonts-noto-color-emoji", install_text)
 
     def test_update_script_supports_clear_images_flag(self) -> None:
         update_text = (PROJECT_ROOT / "scripts" / "update.sh").read_text(encoding="utf-8")

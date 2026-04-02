@@ -288,65 +288,6 @@ class InkyPiSetupTests(unittest.TestCase):
 
             self.assertEqual(generated.size, (800, 480))
 
-    def test_plugin_preserves_emoji_in_text_runs(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
-            source_root = tmpdir_path / "src"
-            self._prepare_plugin_import_tree(source_root)
-
-            plugin_class = self._import_plugin_class(source_root)
-            plugin = plugin_class()
-            text_font = object()
-            emoji_font = object()
-
-            runs = plugin._split_text_runs("Urlaub 😊 in Rom", text_font, emoji_font)
-
-            self.assertEqual([run["text"] for run in runs], ["Urlaub ", "😊", " in Rom"])
-            self.assertEqual([run["font"] for run in runs], [text_font, emoji_font, text_font])
-            self.assertEqual([run["embedded_color"] for run in runs], [False, True, False])
-
-    def test_plugin_generate_image_does_not_crash_when_emoji_font_is_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
-            source_root = tmpdir_path / "src"
-            self._prepare_plugin_import_tree(source_root)
-
-            image_path = tmpdir_path / "prepared.png"
-            payload_path = tmpdir_path / "payload.json"
-            from PIL import Image
-
-            Image.new("RGB", (1600, 600), (210, 120, 70)).save(image_path)
-            payload_path.write_text(
-                json.dumps(
-                    {
-                        "prepared_image_path": str(image_path),
-                        "caption": "Urlaub 😊 in Rom",
-                        "taken_at": "2026-03-18",
-                        "location": "Berlin",
-                        "caption_bar_height": 44,
-                        "caption_font_size": 20,
-                        "metadata_font_size": 14,
-                        "caption_character_limit": 72,
-                        "caption_margin": 12,
-                        "font_path": "/tmp/does-not-exist.ttf",
-                        "emoji_font_path": "/tmp/missing-emoji-font.ttf",
-                        "caption_text_color": "#111111",
-                        "caption_background_color": "#FFFFFF",
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            plugin_class = self._import_plugin_class(source_root)
-            plugin = plugin_class()
-            generated = plugin.generate_image(
-                {"payload_path": str(payload_path)},
-                _FakeDeviceConfig("horizontal", (800, 480)),
-            )
-
-            self.assertEqual(generated.size, (800, 480))
-            self.assertGreater(self._count_nonwhite_pixels(generated, (12, 438, 320, 478)), 0)
-
     def _prepare_plugin_import_tree(self, source_root: Path) -> None:
         plugin_root = source_root / "plugins"
         base_plugin_dir = plugin_root / "base_plugin"

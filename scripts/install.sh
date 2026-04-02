@@ -8,7 +8,7 @@ ensure_runtime_files
 
 if ask_yes_no "Install/update apt packages needed for Python, Pillow, Git, and InkyPi setup?" "y"; then
   run_privileged apt-get update
-  run_privileged apt-get install -y python3 python3-venv python3-pip git rsync curl fonts-dejavu-core fonts-noto-color-emoji
+  run_privileged apt-get install -y python3 python3-venv python3-pip git rsync curl fonts-dejavu-core
 fi
 
 ensure_venv
