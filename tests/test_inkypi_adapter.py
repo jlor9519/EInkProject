@@ -4,6 +4,7 @@ import io
 import json
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -53,7 +54,7 @@ class InkyPiAdapterTests(unittest.TestCase):
                 tmpdir_path,
                 update_method="http_update_now",
                 update_now_url="http://127.0.0.1/update_now",
-                refresh_command="sudo systemctl restart inkypi.service",
+                refresh_command="",
             )
             self._write_device_config(tmpdir_path, orientation="horizontal")
             self._seed_committed_current(storage_config, image_id="img-old", image_bytes=b"old-display")
@@ -69,6 +70,180 @@ class InkyPiAdapterTests(unittest.TestCase):
             payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["image_id"], "img-old")
             self.assertEqual(storage_config.current_image_path.read_bytes(), b"old-display")
+
+    def test_http_timeout_uses_command_fallback_and_marks_backend_degraded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_image = tmpdir_path / "prepared.png"
+            Image.new("RGB", (900, 1600), (12, 34, 56)).save(source_image)
+
+            storage_config = self._build_storage(tmpdir_path)
+            display_config = self._build_display_config()
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="echo refresh",
+            )
+            self._write_device_config(tmpdir_path, orientation="horizontal")
+            adapter = InkyPiAdapter(inkypi_config, storage_config, display_config)
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ), patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=_FakeCompletedProcess(returncode=0, stdout="refresh ok"),
+            ):
+                result = adapter.display(self._build_request(tmpdir_path, source_image))
+
+            self.assertTrue(result.success)
+            self.assertIn("command fallback succeeded", result.message)
+            diagnostics = adapter.backend_diagnostics()
+            self.assertTrue(diagnostics["degraded"])
+            self.assertIn("Befehl-Fallback aktiv", diagnostics["message"])
+            payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-1")
+
+    def test_http_and_command_failures_are_combined_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_image = tmpdir_path / "prepared.png"
+            Image.new("RGB", (900, 1600), (12, 34, 56)).save(source_image)
+
+            storage_config = self._build_storage(tmpdir_path)
+            display_config = self._build_display_config()
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="echo refresh",
+            )
+            self._write_device_config(tmpdir_path, orientation="horizontal")
+            adapter = InkyPiAdapter(inkypi_config, storage_config, display_config)
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ), patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=_FakeCompletedProcess(returncode=1, stderr="permission denied"),
+            ):
+                result = adapter.display(self._build_request(tmpdir_path, source_image))
+
+            self.assertFalse(result.success)
+            self.assertIn("HTTP refresh failed", result.message)
+            self.assertIn("command fallback failed", result.message)
+            self.assertIn("permission denied", result.message)
+
+    def test_degraded_http_window_skips_http_until_it_expires(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            storage_config = self._build_storage(tmpdir_path)
+            display_config = self._build_display_config()
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="echo refresh",
+            )
+            self._write_device_config(tmpdir_path, orientation="horizontal")
+            storage_config.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            storage_config.current_payload_path.write_text(
+                json.dumps({"orientation_hint": "horizontal"}),
+                encoding="utf-8",
+            )
+            adapter = InkyPiAdapter(inkypi_config, storage_config, display_config)
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ) as mock_http, patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=_FakeCompletedProcess(returncode=0, stdout="refresh ok"),
+            ) as mock_command:
+                first = adapter.refresh_only()
+                second = adapter.refresh_only()
+
+            self.assertTrue(first.success)
+            self.assertTrue(second.success)
+            self.assertEqual(mock_http.call_count, 1)
+            self.assertEqual(mock_command.call_count, 2)
+
+            adapter._http_degraded_until_monotonic = time.monotonic() - 1
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                return_value=_FakeHttpResponse('{"message":"ok"}'),
+            ) as mock_http, patch(
+                "app.inkypi_adapter.subprocess.run",
+            ) as mock_command:
+                third = adapter.refresh_only()
+
+            self.assertTrue(third.success)
+            self.assertEqual(mock_http.call_count, 1)
+            mock_command.assert_not_called()
+            self.assertFalse(adapter.backend_diagnostics()["degraded"])
+
+    def test_http_timeout_with_restart_command_temporarily_syncs_staged_payload_and_restores_stable_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_image = tmpdir_path / "prepared.png"
+            Image.new("RGB", (900, 1600), (12, 34, 56)).save(source_image)
+
+            storage_config = self._build_storage(tmpdir_path)
+            display_config = self._build_display_config()
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            self._write_device_config(tmpdir_path, orientation="horizontal")
+            device_config_path = tmpdir_path / "InkyPi" / "src" / "config" / "device.json"
+            device_config = json.loads(device_config_path.read_text(encoding="utf-8"))
+            device_config["playlist_config"] = {
+                "active_playlist": "Default",
+                "playlists": [
+                    {
+                        "name": "Default",
+                        "start_time": "00:00",
+                        "end_time": "24:00",
+                        "current_plugin_index": 0,
+                        "plugins": [
+                            {
+                                "plugin_id": "telegram_frame",
+                                "name": "Telegram Frame",
+                                "plugin_settings": {"payload_path": "/tmp/old.json"},
+                                "refresh": {"interval": 86400},
+                            }
+                        ],
+                    }
+                ],
+            }
+            device_config_path.write_text(json.dumps(device_config), encoding="utf-8")
+            adapter = InkyPiAdapter(inkypi_config, storage_config, display_config)
+
+            with patch.object(
+                adapter,
+                "_sync_active_plugin_instance",
+                wraps=adapter._sync_active_plugin_instance,
+            ) as mock_sync, patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ), patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=_FakeCompletedProcess(returncode=0, stdout="active"),
+            ):
+                result = adapter.display(self._build_request(tmpdir_path, source_image))
+
+            self.assertTrue(result.success)
+            sync_targets = [call.args[0] for call in mock_sync.call_args_list]
+            self.assertEqual(sync_targets[0], storage_config.current_payload_path)
+            self.assertIn(storage_config.current_payload_path, sync_targets[2:])
+            self.assertTrue(any(path != storage_config.current_payload_path for path in sync_targets[1:-1]))
+            updated_device = json.loads(device_config_path.read_text(encoding="utf-8"))
+            plugin_payload = updated_device["playlist_config"]["playlists"][0]["plugins"][0]["plugin_settings"]["payload_path"]
+            self.assertEqual(plugin_payload, str(storage_config.current_payload_path.resolve(strict=False)))
 
     def test_failed_command_display_keeps_committed_current_files_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -501,6 +676,50 @@ class InkyPiAdapterTests(unittest.TestCase):
             self.assertTrue(result.reloaded)
             self.assertTrue(result.refreshed)
 
+    def test_apply_device_settings_uses_command_fallback_when_http_stays_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            storage_config = self._build_storage(tmpdir_path)
+            display_config = self._build_display_config()
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            self._write_device_config(
+                tmpdir_path,
+                orientation="horizontal",
+                image_settings={"saturation": 1.2},
+            )
+            storage_config.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            storage_config.current_payload_path.write_text(
+                json.dumps({"orientation_hint": "horizontal"}),
+                encoding="utf-8",
+            )
+            adapter = InkyPiAdapter(inkypi_config, storage_config, display_config)
+
+            with patch(
+                "app.inkypi_adapter.subprocess.run",
+                side_effect=[
+                    _FakeCompletedProcess(returncode=0),
+                    _FakeCompletedProcess(returncode=0, stdout="active\n"),
+                    _FakeCompletedProcess(returncode=0, stdout="refresh ok"),
+                ],
+            ) as mock_command, patch.object(
+                adapter,
+                "_wait_for_inkypi_http_ready",
+                return_value="connection refused",
+            ):
+                result = adapter.apply_device_settings({"image_settings": {"saturation": 1.5}})
+
+            self.assertTrue(result.success)
+            self.assertTrue(result.saved)
+            self.assertTrue(result.reloaded)
+            self.assertTrue(result.refreshed)
+            self.assertTrue(adapter.backend_diagnostics()["degraded"])
+            self.assertEqual(mock_command.call_count, 3)
+
     def test_apply_device_settings_skips_refresh_without_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -559,6 +778,31 @@ class InkyPiAdapterTests(unittest.TestCase):
             mock_service.assert_called_once()
             mock_http.assert_called_once()
 
+    def test_wait_until_ready_continues_with_degraded_http_when_refresh_command_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            adapter = InkyPiAdapter(
+                self._build_config(
+                    tmpdir_path,
+                    update_method="http_update_now",
+                    update_now_url="http://127.0.0.1/update_now",
+                    refresh_command="sudo systemctl restart inkypi.service",
+                ),
+                self._build_storage(tmpdir_path),
+                self._build_display_config(),
+            )
+
+            with patch.object(adapter, "_wait_for_inkypi_service_active", return_value=None) as mock_service, patch.object(
+                adapter,
+                "_wait_for_inkypi_http_ready",
+                return_value="connection refused",
+            ) as mock_http:
+                self.assertIsNone(adapter.wait_until_ready())
+
+            self.assertTrue(adapter.backend_diagnostics()["degraded"])
+            mock_service.assert_called_once()
+            mock_http.assert_called_once()
+
     def test_wait_until_ready_in_command_mode_skips_service_and_http_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -590,7 +834,7 @@ class InkyPiAdapterTests(unittest.TestCase):
                     tmpdir_path,
                     update_method="http_update_now",
                     update_now_url="http://127.0.0.1/update_now",
-                    refresh_command="sudo systemctl restart inkypi.service",
+                    refresh_command="",
                 ),
                 self._build_storage(tmpdir_path),
                 self._build_display_config(),

@@ -142,6 +142,10 @@ async def _render_status_text(services: AppServices) -> str:
     payload_ok = services.display.payload_exists()
     diagnostics_fn = getattr(services.display, "runtime_settings_diagnostics", None)
     runtime_diagnostics = diagnostics_fn() if callable(diagnostics_fn) else {"degraded": False, "message": ""}
+    backend_diagnostics_fn = getattr(services.display, "backend_diagnostics", None)
+    backend_diagnostics = (
+        backend_diagnostics_fn() if callable(backend_diagnostics_fn) else {"degraded": False, "message": ""}
+    )
 
     inkypi_reachable = await asyncio.to_thread(services.display.ping_inkypi)
     if inkypi_reachable is None:
@@ -182,6 +186,8 @@ async def _render_status_text(services: AppServices) -> str:
     warnings: list[str] = []
     if runtime_diagnostics["degraded"]:
         warnings.append(str(runtime_diagnostics["message"]))
+    if backend_diagnostics["degraded"]:
+        warnings.append(str(backend_diagnostics["message"]))
 
     return "\n".join(
         [

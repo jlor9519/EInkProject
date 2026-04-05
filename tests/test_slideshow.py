@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from urllib.error import URLError
 from zoneinfo import ZoneInfo
 
 from app.commands import list_command
@@ -123,28 +122,33 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
             self.assert_future_timestamp(services.database.get_setting("slideshow_next_fire_at"))
             self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
 
-    async def test_repeated_display_error_retries_keep_current_payload_stable(self) -> None:
+    async def test_auto_advance_uses_command_fallback_while_http_backend_is_degraded(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             services = _build_services_with_real_adapter(tmpdir_path, interval_seconds=7200)
-            _seed_displayed_images(tmpdir_path, services, ["img-1", "img-2"])
+            _seed_displayed_images(tmpdir_path, services, ["img-1", "img-2", "img-3"])
             context = _JobContext(services)
 
             with patch(
                 "app.inkypi_adapter.request.urlopen",
-                side_effect=URLError(ConnectionRefusedError(111, "Connection refused")),
-            ):
+                side_effect=TimeoutError("timed out"),
+            ) as mock_http, patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="refresh ok", stderr=""),
+            ) as mock_command:
                 await _advance_slideshow(context)
                 await _advance_slideshow(context)
 
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-1")
-            self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
+            self.assertEqual(payload["image_id"], "img-3")
+            self.assertEqual(mock_http.call_count, 1)
+            self.assertEqual(mock_command.call_count, 2)
+            self.assertNotEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
 
             update = _MessageUpdate()
             command_context = _CommandContext(services)
             await list_command(update, command_context)
-            self.assertIn('"img-1"', update.effective_message.replies[0])
+            self.assertIn('"img-3"', update.effective_message.replies[0])
 
     async def test_auto_advance_ignores_images_hidden_by_rotation_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

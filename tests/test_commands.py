@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from urllib.error import URLError
 
 from app.commands import (
     _delete_cancel_callback,
@@ -19,6 +18,7 @@ from app.commands import (
     list_command,
     next_command,
     prev_command,
+    refresh_command,
     status_command,
 )
 from app.database import Database
@@ -418,6 +418,22 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Warnungen:", reply)
             self.assertIn("Geräteeinstellungen aus Cache aktiv", reply)
 
+    async def test_status_shows_backend_fallback_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            services.display.backend_diagnostics = lambda: {
+                "degraded": True,
+                "message": "InkyPi-HTTP gestört, Befehl-Fallback aktiv",
+            }
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await status_command(update, context)
+
+            reply = update.effective_message.replies[0]
+            self.assertIn("Warnungen:", reply)
+            self.assertIn("Befehl-Fallback aktiv", reply)
+
     async def test_list_shows_cooldown_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -761,7 +777,7 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(services.display.display_calls[-1], "img-previous")
             self.assertEqual(update.effective_message.replies[-1], "Bild 1 von 2: img-previous")
 
-    async def test_failed_next_keeps_current_payload_and_list_stable(self) -> None:
+    async def test_next_uses_command_fallback_after_http_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             services = _build_services_with_real_adapter(tmpdir_path)
@@ -779,22 +795,22 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
 
             with patch(
                 "app.inkypi_adapter.request.urlopen",
-                side_effect=URLError(ConnectionRefusedError(111, "Connection refused")),
+                side_effect=TimeoutError("timed out"),
+            ), patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="refresh ok", stderr=""),
             ):
                 await next_command(update_next, context)
 
-            self.assertEqual(
-                update_next.effective_message.replies[-1],
-                "Display nicht erreichbar. Bitte prüfe die Verbindung zum Pi.",
-            )
+            self.assertEqual(update_next.effective_message.replies[-1], "Bild 2 von 2: img-next")
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-current")
+            self.assertEqual(payload["image_id"], "img-next")
 
             update_list = _MessageUpdate()
             await list_command(update_list, context)
-            self.assertIn('"img-current"', update_list.effective_message.replies[0])
+            self.assertIn('"img-next"', update_list.effective_message.replies[0])
 
-    async def test_failed_prev_keeps_current_payload_unchanged(self) -> None:
+    async def test_prev_uses_command_fallback_after_http_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             services = _build_services_with_real_adapter(tmpdir_path)
@@ -812,16 +828,42 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
 
             with patch(
                 "app.inkypi_adapter.request.urlopen",
-                side_effect=URLError(ConnectionRefusedError(111, "Connection refused")),
+                side_effect=TimeoutError("timed out"),
+            ), patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="refresh ok", stderr=""),
             ):
                 await prev_command(update, context)
 
-            self.assertEqual(
-                update.effective_message.replies[-1],
-                "Display nicht erreichbar. Bitte prüfe die Verbindung zum Pi.",
-            )
+            self.assertEqual(update.effective_message.replies[-1], "Bild 1 von 2: img-prev")
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-current")
+            self.assertEqual(payload["image_id"], "img-prev")
+
+    async def test_refresh_uses_command_fallback_after_http_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services_with_real_adapter(tmpdir_path)
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-current", "orientation_hint": "horizontal"}),
+                encoding="utf-8",
+            )
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ), patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="refresh ok", stderr=""),
+            ):
+                await refresh_command(update, context)
+
+            self.assertEqual(update.effective_message.replies[-1], "Aktualisierung ausgelöst.")
+            status_update = _MessageUpdate()
+            await status_command(status_update, context)
+            self.assertIn("Befehl-Fallback aktiv", status_update.effective_message.replies[0])
 
     async def test_help_command_adds_quick_actions_and_admin_settings_button(self) -> None:
         services = _build_services(Path(tempfile.mkdtemp()), is_admin=True)

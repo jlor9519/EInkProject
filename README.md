@@ -24,7 +24,8 @@ By default, the setup expects the standard upstream InkyPi layout:
 2. The bot asks for location, date, and caption.
 3. The app saves the original photo and metadata locally.
 4. The app renders a captioned RGB bridge image and writes a canonical bridge payload.
-5. The app triggers the configured InkyPi refresh command.
+5. The app triggers InkyPi, using the local `update_now` HTTP endpoint first when configured and
+   falling back to the configured refresh command if the HTTP refresh hangs or is unreachable.
 6. The custom InkyPi plugin reads the bridge payload and returns a `PIL.Image` for display.
 7. The app stores the result in SQLite.
 
@@ -133,4 +134,5 @@ That runner uses isolated state under `telegram-bot-test/`, mocks display refres
 - The default Waveshare model is set to `epd7in3e`, which matches the Waveshare 7.3 inch E6 documentation.
 - The default render size is `800x480`.
 - The default InkyPi source checkout path is `~/InkyPi`, and the default runtime install path is `/usr/local/inkypi`.
+- `inkypi.refresh_command` is used as the primary trigger in `command` mode and as the automatic recovery fallback when `http_update_now` is configured but the local HTTP refresh path is unhealthy.
 - Exact InkyPi refresh behavior is intentionally configurable because the validated local command may differ between installations.

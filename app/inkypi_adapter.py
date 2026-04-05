@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import socket
 import shlex
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ from app.models import (
 INKYPI_SERVICE_NAME = "inkypi.service"
 INKYPI_RESTART_TIMEOUT_SECONDS = 45
 INKYPI_HTTP_READY_TIMEOUT_SECONDS = 30
+HTTP_DEGRADED_COOLDOWN_SECONDS = 300
 DEFAULT_TELEGRAM_FRAME_INSTANCE_NAME = "Telegram Frame"
 COMMITTED_ARTIFACT_DIR_NAME = "committed"
 COMMITTED_ARTIFACT_RETENTION = 5
@@ -79,6 +81,8 @@ class InkyPiAdapter:
         self.database = database
         self.layout = resolve_inkypi_layout(config.repo_path, config.install_path)
         self._systemctl_bin = shutil.which("systemctl") or "/usr/bin/systemctl"
+        self._http_degraded_until_monotonic = 0.0
+        self._http_degraded_reason = ""
 
     def display(self, request: DisplayRequest) -> DisplayResult:
         logger.info("Preparing staged bridge payload for image %s", request.image_id)
@@ -92,9 +96,18 @@ class InkyPiAdapter:
                 plugin_payload_path=self.storage.current_payload_path,
             )
             if result.success:
-                self._commit_display_state(request, staged_image_path)
-                staged_image_path = None
-                result.payload_path = self.storage.current_payload_path
+                try:
+                    self._commit_display_state(request, staged_image_path)
+                    staged_image_path = None
+                    result.payload_path = self.storage.current_payload_path
+                finally:
+                    restore_result = self._sync_active_plugin_instance(self.storage.current_payload_path)
+                    if restore_result is not None:
+                        logger.warning(
+                            "Failed to restore Telegram Frame plugin payload to %s after successful display: %s",
+                            self.storage.current_payload_path,
+                            restore_result.message,
+                        )
             else:
                 result.payload_path = staged_payload_path
             logger.info("Display result for %s: success=%s", request.image_id, result.success)
@@ -131,6 +144,18 @@ class InkyPiAdapter:
         return {
             "degraded": True,
             "message": f"Geräteeinstellungen verwenden Standardwerte ({error_text or 'device.json fehlt'})",
+        }
+
+    def backend_diagnostics(self) -> dict[str, str | bool]:
+        if self.config.update_method != "http_update_now" or not self._is_http_backend_degraded():
+            return {"degraded": False, "message": ""}
+        remaining = max(1, int(self._http_degraded_until_monotonic - time.monotonic()))
+        return {
+            "degraded": True,
+            "message": (
+                "InkyPi-HTTP gestört, Befehl-Fallback aktiv "
+                f"(noch ca. {self._format_duration_brief(remaining)}): {self._http_degraded_reason}"
+            ),
         }
 
     def apply_device_settings(
@@ -223,17 +248,26 @@ class InkyPiAdapter:
 
         http_ready_error = self._wait_for_inkypi_http_ready()
         if http_ready_error is not None:
-            return DeviceSettingsApplyResult(
-                success=False,
-                message=(
-                    "Einstellungen wurden gespeichert und InkyPi wurde neu geladen, "
-                    f"aber der InkyPi-Webserver war noch nicht erreichbar: {http_ready_error}"
-                ),
-                confirmed_settings=confirmed,
-                device_config_path=device_config_path,
-                saved=True,
-                reloaded=True,
-            )
+            if self._has_refresh_command():
+                self._mark_http_backend_degraded(http_ready_error)
+                logger.warning(
+                    "InkyPi HTTP backend is not ready after reload; using command fallback for the live refresh: %s",
+                    http_ready_error,
+                )
+            else:
+                return DeviceSettingsApplyResult(
+                    success=False,
+                    message=(
+                        "Einstellungen wurden gespeichert und InkyPi wurde neu geladen, "
+                        f"aber der InkyPi-Webserver war noch nicht erreichbar: {http_ready_error}"
+                    ),
+                    confirmed_settings=confirmed,
+                    device_config_path=device_config_path,
+                    saved=True,
+                    reloaded=True,
+                )
+        else:
+            self._clear_http_backend_degraded()
 
         refresh_result = self._trigger_display_update(self.storage.current_payload_path)
 
@@ -277,7 +311,18 @@ class InkyPiAdapter:
         service_error = self._wait_for_inkypi_service_active()
         if service_error is not None:
             return service_error
-        return self._wait_for_inkypi_http_ready()
+        http_error = self._wait_for_inkypi_http_ready()
+        if http_error is None:
+            self._clear_http_backend_degraded()
+            return None
+        if self._has_refresh_command():
+            self._mark_http_backend_degraded(http_error)
+            logger.warning(
+                "InkyPi HTTP backend is not ready; continuing startup with command fallback enabled: %s",
+                http_error,
+            )
+            return None
+        return http_error
 
     def _trigger_display_update(
         self,
@@ -294,16 +339,111 @@ class InkyPiAdapter:
         if payload is None:
             return DisplayResult(False, f"InkyPi payload does not exist: {payload_path}")
 
-        plugin_sync_result = self._sync_active_plugin_instance(plugin_payload_path or payload_path)
-        if plugin_sync_result is not None:
-            return plugin_sync_result
+        command_image_path = image_path or self.storage.current_image_path
+        primary_plugin_payload_path = plugin_payload_path or payload_path
 
         if self.config.update_method == "http_update_now":
-            logger.info("Triggering display via HTTP POST to %s", self.config.update_now_url)
-            return self._post_update_now(payload_path)
+            plugin_sync_result = self._sync_active_plugin_instance(primary_plugin_payload_path)
+            if plugin_sync_result is not None:
+                return plugin_sync_result
 
-        command = self._format_refresh_command(payload_path, image_path or self.storage.current_image_path)
+            if self._is_http_backend_degraded() and self._has_refresh_command():
+                logger.warning(
+                    "Skipping InkyPi update_now because the HTTP backend is in degraded mode; using command fallback"
+                )
+                command_result = self._run_refresh_command_with_payload_support(
+                    payload_path,
+                    command_image_path,
+                    primary_plugin_payload_path=primary_plugin_payload_path,
+                )
+                if command_result.success:
+                    logger.info("Display refresh succeeded via command fallback while HTTP backend was degraded")
+                    return DisplayResult(
+                        True,
+                        f"command fallback used while HTTP backend was degraded: {command_result.message}",
+                    )
+                return DisplayResult(
+                    False,
+                    (
+                        "InkyPi HTTP backend ist derzeit gestört "
+                        f"({self._http_degraded_reason}); command fallback failed: {command_result.message}"
+                    ),
+                )
+
+            logger.info("Triggering display via HTTP POST to %s", self.config.update_now_url)
+            http_result, fallback_eligible = self._post_update_now(payload_path)
+            if http_result.success:
+                self._clear_http_backend_degraded()
+                logger.info("Display refresh succeeded via HTTP update_now")
+                return http_result
+            if fallback_eligible and self._has_refresh_command():
+                self._mark_http_backend_degraded(http_result.message)
+                logger.warning("HTTP refresh failed; trying command fallback: %s", http_result.message)
+                command_result = self._run_refresh_command_with_payload_support(
+                    payload_path,
+                    command_image_path,
+                    primary_plugin_payload_path=primary_plugin_payload_path,
+                )
+                if command_result.success:
+                    logger.warning(
+                        "Display refresh recovered via command fallback after HTTP failure: %s",
+                        http_result.message,
+                    )
+                    return DisplayResult(
+                        True,
+                        f"HTTP refresh failed ({http_result.message}); command fallback succeeded: {command_result.message}",
+                    )
+                logger.warning(
+                    "Display refresh failed on both HTTP and command fallback: %s | %s",
+                    http_result.message,
+                    command_result.message,
+                )
+                return DisplayResult(
+                    False,
+                    f"HTTP refresh failed: {http_result.message}; command fallback failed: {command_result.message}",
+                )
+            return http_result
+
+        plugin_sync_result = self._sync_active_plugin_instance(primary_plugin_payload_path)
+        if plugin_sync_result is not None:
+            return plugin_sync_result
+        return self._run_refresh_command_with_payload_support(
+            payload_path,
+            command_image_path,
+            primary_plugin_payload_path=primary_plugin_payload_path,
+        )
+
+    def _run_refresh_command_with_payload_support(
+        self,
+        payload_path: Path,
+        image_path: Path,
+        *,
+        primary_plugin_payload_path: Path,
+    ) -> DisplayResult:
+        restore_plugin_payload = (
+            primary_plugin_payload_path
+            if self._command_needs_temporary_plugin_payload(payload_path, primary_plugin_payload_path)
+            else None
+        )
+        if restore_plugin_payload is not None:
+            sync_result = self._sync_active_plugin_instance(payload_path)
+            if sync_result is not None:
+                return sync_result
+
+        command = self._format_refresh_command(payload_path, image_path)
         logger.info("Triggering display via command: %s", command)
+        result = self._execute_refresh_command(command)
+        if restore_plugin_payload is not None and not result.success:
+            restore_result = self._sync_active_plugin_instance(restore_plugin_payload)
+            if restore_result is not None:
+                logger.warning(
+                    "Failed to restore Telegram Frame plugin payload to %s after command failure: %s",
+                    restore_plugin_payload,
+                    restore_result.message,
+                )
+        return result
+
+    def _execute_refresh_command(self, command: list[str]) -> DisplayResult:
         try:
             completed = subprocess.run(
                 command,
@@ -320,7 +460,7 @@ class InkyPiAdapter:
             return DisplayResult(False, f"InkyPi refresh failed: {stderr}")
         return DisplayResult(True, completed.stdout.strip() or "refresh command completed successfully")
 
-    def _post_update_now(self, payload_path: Path) -> DisplayResult:
+    def _post_update_now(self, payload_path: Path) -> tuple[DisplayResult, bool]:
         form = parse.urlencode(
             {
                 "plugin_id": self.config.plugin_id,
@@ -337,15 +477,19 @@ class InkyPiAdapter:
         try:
             with request.urlopen(http_request, timeout=60) as response:
                 body = response.read().decode("utf-8", errors="replace")
-                return self._parse_http_response(body, response.status)
+                return self._parse_http_response(body, response.status), False
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             parsed = self._parse_http_response(body, exc.code)
             if parsed.success:
-                return DisplayResult(False, f"InkyPi update_now returned HTTP {exc.code}")
-            return parsed
+                return DisplayResult(False, f"InkyPi update_now returned HTTP {exc.code}"), False
+            return parsed, False
+        except (TimeoutError, socket.timeout):
+            return DisplayResult(False, "InkyPi update_now request timed out after 60 seconds"), True
         except error.URLError as exc:
-            return DisplayResult(False, f"InkyPi update_now request failed: {exc.reason}")
+            return DisplayResult(False, f"InkyPi update_now request failed: {exc.reason}"), True
+        except OSError as exc:
+            return DisplayResult(False, f"InkyPi update_now request failed: {exc}"), True
 
     def _parse_http_response(self, body: str, status_code: int) -> DisplayResult:
         text = body.strip()
@@ -605,6 +749,8 @@ class InkyPiAdapter:
         """Return True=reachable, False=unreachable, None=not applicable (non-HTTP mode)."""
         if self.config.update_method != "http_update_now":
             return None
+        if self._is_http_backend_degraded():
+            return False
         update_parts = parse.urlsplit(self.config.update_now_url)
         probe_url = parse.urlunsplit((update_parts.scheme, update_parts.netloc, "/", "", ""))
         try:
@@ -804,6 +950,45 @@ class InkyPiAdapter:
             plugin_id=self.config.plugin_id,
         )
         return shlex.split(command)
+
+    def _has_refresh_command(self) -> bool:
+        return bool(self.config.refresh_command.strip())
+
+    def _refresh_command_uses_explicit_paths(self) -> bool:
+        raw = self.config.refresh_command
+        return "{payload_path}" in raw or "{image_path}" in raw
+
+    def _command_needs_temporary_plugin_payload(
+        self,
+        payload_path: Path,
+        primary_plugin_payload_path: Path,
+    ) -> bool:
+        return (
+            not self._refresh_command_uses_explicit_paths()
+            and payload_path != primary_plugin_payload_path
+        )
+
+    def _mark_http_backend_degraded(self, reason: str) -> None:
+        self._http_degraded_until_monotonic = time.monotonic() + HTTP_DEGRADED_COOLDOWN_SECONDS
+        self._http_degraded_reason = reason
+
+    def _clear_http_backend_degraded(self) -> None:
+        self._http_degraded_until_monotonic = 0.0
+        self._http_degraded_reason = ""
+
+    def _is_http_backend_degraded(self) -> bool:
+        return self._http_degraded_until_monotonic > time.monotonic()
+
+    @staticmethod
+    def _format_duration_brief(seconds: int) -> str:
+        if seconds >= 3600:
+            hours, remainder = divmod(seconds, 3600)
+            minutes = remainder // 60
+            return f"{hours} Std. {minutes} Min." if minutes else f"{hours} Std."
+        if seconds >= 60:
+            minutes, remainder = divmod(seconds, 60)
+            return f"{minutes} Min. {remainder} Sek." if remainder else f"{minutes} Min."
+        return f"{seconds} Sek."
 
     def _committed_image_path(self, request: DisplayRequest) -> Path:
         return self._committed_images_dir() / f"{request.image_id}_{self._revision_hash(request.to_payload())}.png"

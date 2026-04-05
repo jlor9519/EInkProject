@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -22,7 +23,8 @@ from app.conversations import (
     receive_text_choice,
 )
 from app.database import Database
-from app.models import DisplayResult, ImageRecord
+from app.inkypi_adapter import InkyPiAdapter
+from app.models import DisplayConfig, DisplayResult, ImageRecord, InkyPiConfig, StorageConfig
 
 
 class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -354,6 +356,49 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             await task
             self.assertEqual(display.calls, 1)
 
+    async def test_process_queued_upload_uses_command_fallback_after_http_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services_with_real_adapter(tmpdir_path)
+            application = _FakeApplication(services)
+
+            original = services.storage.original_path("img-1")
+            original.parent.mkdir(parents=True, exist_ok=True)
+            original.write_bytes(b"original")
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=555,
+                    local_original_path=str(original),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="queued",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ), patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="refresh ok", stderr=""),
+            ):
+                await process_queued_upload(application, "img-1")
+
+            record = services.database.get_image_by_id("img-1")
+            self.assertEqual(record.status, "displayed")
+            self.assertEqual(application.bot.messages, [(555, "Das Bild wird jetzt angezeigt.")])
+            payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-1")
+            self.assertTrue(services.display.backend_diagnostics()["degraded"])
+
 
 class _FakeAuth:
     def sync_user(self, user) -> None:
@@ -540,6 +585,60 @@ def _build_services(
         renderer=_FakeRenderer(),
         display=display or _FakeDisplay(),
         config=SimpleNamespace(storage=SimpleNamespace(current_payload_path=base_dir / "inkypi" / "current.json")),
+        bot=fake_bot,
+    )
+
+
+def _build_services_with_real_adapter(base_dir: Path, *, bot: _FakeBot | None = None):
+    database = Database(base_dir / "photo_frame.db")
+    database.initialize()
+    storage = _FakeStorage(base_dir)
+    storage_config = StorageConfig(
+        incoming_dir=base_dir / "incoming",
+        rendered_dir=base_dir / "rendered",
+        cache_dir=base_dir / "cache",
+        archive_dir=base_dir / "archive",
+        inkypi_payload_dir=base_dir / "inkypi",
+        current_payload_path=base_dir / "inkypi" / "current.json",
+        current_image_path=base_dir / "inkypi" / "current.png",
+        keep_recent_rendered=5,
+    )
+    display_config = DisplayConfig(
+        width=800,
+        height=480,
+        caption_height=44,
+        margin=18,
+        metadata_font_size=14,
+        caption_font_size=20,
+        caption_character_limit=72,
+        max_caption_lines=1,
+        font_path="/tmp/does-not-exist.ttf",
+        background_color="#F7F3EA",
+        text_color="#111111",
+        divider_color="#3A3A3A",
+    )
+    inkypi_config = InkyPiConfig(
+        repo_path=base_dir / "InkyPi",
+        install_path=base_dir / "usr" / "local" / "inkypi",
+        validated_commit="main",
+        waveshare_model="epd7in3e",
+        plugin_id="telegram_frame",
+        payload_dir=base_dir / "inkypi",
+        update_method="http_update_now",
+        update_now_url="http://127.0.0.1/update_now",
+        refresh_command="echo refresh",
+    )
+    device_config_path = base_dir / "InkyPi" / "src" / "config" / "device.json"
+    device_config_path.parent.mkdir(parents=True, exist_ok=True)
+    device_config_path.write_text(json.dumps({"orientation": "horizontal"}), encoding="utf-8")
+    fake_bot = bot or _FakeBot()
+    return SimpleNamespace(
+        auth=_FakeAuth(),
+        database=database,
+        storage=storage,
+        renderer=_FakeRenderer(),
+        display=InkyPiAdapter(inkypi_config, storage_config, display_config, database=database),
+        config=SimpleNamespace(storage=storage_config),
         bot=fake_bot,
     )
 
