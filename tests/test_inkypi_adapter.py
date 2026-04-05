@@ -161,13 +161,13 @@ class InkyPiAdapterTests(unittest.TestCase):
             ) as mock_http, patch(
                 "app.inkypi_adapter.subprocess.run",
                 return_value=_FakeCompletedProcess(returncode=0, stdout="refresh ok"),
-            ) as mock_command:
+            ) as mock_command, patch("app.inkypi_adapter.time.sleep"):
                 first = adapter.refresh_only()
                 second = adapter.refresh_only()
 
             self.assertTrue(first.success)
             self.assertTrue(second.success)
-            self.assertEqual(mock_http.call_count, 1)
+            self.assertEqual(mock_http.call_count, 3)
             self.assertEqual(mock_command.call_count, 2)
 
             adapter._http_degraded_until_monotonic = time.monotonic() - 1

@@ -358,6 +358,9 @@ class InkyPiAdapter:
                 )
                 if command_result.success:
                     logger.info("Display refresh succeeded via command fallback while HTTP backend was degraded")
+                    retry_result = self._retry_http_post_after_fallback(payload_path)
+                    if retry_result and retry_result.success:
+                        self._clear_http_backend_degraded()
                     return DisplayResult(
                         True,
                         f"command fallback used while HTTP backend was degraded: {command_result.message}",
@@ -389,6 +392,7 @@ class InkyPiAdapter:
                         "Display refresh recovered via command fallback after HTTP failure: %s",
                         http_result.message,
                     )
+                    self._retry_http_post_after_fallback(payload_path)
                     return DisplayResult(
                         True,
                         f"HTTP refresh failed ({http_result.message}); command fallback succeeded: {command_result.message}",
@@ -475,7 +479,7 @@ class InkyPiAdapter:
         )
 
         try:
-            with request.urlopen(http_request, timeout=60) as response:
+            with request.urlopen(http_request, timeout=30) as response:
                 body = response.read().decode("utf-8", errors="replace")
                 return self._parse_http_response(body, response.status), False
         except error.HTTPError as exc:
@@ -485,11 +489,26 @@ class InkyPiAdapter:
                 return DisplayResult(False, f"InkyPi update_now returned HTTP {exc.code}"), False
             return parsed, False
         except (TimeoutError, socket.timeout):
-            return DisplayResult(False, "InkyPi update_now request timed out after 60 seconds"), True
+            return DisplayResult(False, "InkyPi update_now request timed out after 30 seconds"), True
         except error.URLError as exc:
             return DisplayResult(False, f"InkyPi update_now request failed: {exc.reason}"), True
         except OSError as exc:
             return DisplayResult(False, f"InkyPi update_now request failed: {exc}"), True
+
+    def _retry_http_post_after_fallback(self, payload_path: Path) -> DisplayResult | None:
+        """Sleep briefly after a command fallback restart, then retry the HTTP POST.
+
+        Returns the retry DisplayResult on success, or None if the retry failed.
+        This ensures InkyPi actually picks up the new payload after a service restart.
+        """
+        logger.info("Waiting 5s for InkyPi to come back up before retrying HTTP POST")
+        time.sleep(5)
+        retry_result, _ = self._post_update_now(payload_path)
+        if retry_result.success:
+            logger.info("HTTP POST succeeded after command fallback restart")
+            return retry_result
+        logger.warning("HTTP POST retry after command fallback also failed: %s", retry_result.message)
+        return None
 
     def _parse_http_response(self, body: str, status_code: int) -> DisplayResult:
         text = body.strip()

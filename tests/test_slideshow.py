@@ -135,13 +135,13 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
             ) as mock_http, patch(
                 "app.inkypi_adapter.subprocess.run",
                 return_value=SimpleNamespace(returncode=0, stdout="refresh ok", stderr=""),
-            ) as mock_command:
+            ) as mock_command, patch("app.inkypi_adapter.time.sleep"):
                 await _advance_slideshow(context)
                 await _advance_slideshow(context)
 
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["image_id"], "img-3")
-            self.assertEqual(mock_http.call_count, 1)
+            self.assertEqual(mock_http.call_count, 3)
             self.assertEqual(mock_command.call_count, 2)
             self.assertNotEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
 
