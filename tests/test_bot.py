@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from telegram.error import NetworkError
+from telegram.error import NetworkError, TimedOut
 
 from app.bot import (
     LAST_HANDLED_BOOT_ID_KEY,
@@ -201,6 +201,16 @@ class ErrorHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("app.bot.logger") as mock_logger:
             await _application_error_handler(None, context)
+
+        mock_logger.warning.assert_called_once()
+        mock_logger.error.assert_not_called()
+
+    async def test_application_error_handler_downgrades_network_errors_during_update_processing(self) -> None:
+        context = SimpleNamespace(error=TimedOut())
+        update = SimpleNamespace(update_id=456)
+
+        with patch("app.bot.logger") as mock_logger:
+            await _application_error_handler(update, context)
 
         mock_logger.warning.assert_called_once()
         mock_logger.error.assert_not_called()

@@ -52,6 +52,15 @@ async def _application_error_handler(update: object, context) -> None:
         logger.warning("Telegram polling network error; retrying: %s", error)
         return
 
+    if isinstance(error, (NetworkError, TimedOut)):
+        update_id = getattr(update, "update_id", None)
+        logger.warning(
+            "Telegram network error while processing update %s; user may need to retry: %s",
+            update_id,
+            error,
+        )
+        return
+
     if error is None:
         logger.error("Unhandled Telegram application error without exception context")
         return
