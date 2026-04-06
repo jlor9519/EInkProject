@@ -88,8 +88,17 @@ class Database:
                     last_error TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS error_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    image_id TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_maintenance_jobs_status ON maintenance_jobs(status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_error_log_timestamp ON error_log(timestamp DESC);
                 """
             )
             columns = {
@@ -876,6 +885,34 @@ class Database:
     def delete_setting(self, key: str) -> None:
         with self._lock:
             self._connection.execute("DELETE FROM settings WHERE key = ?", (key,))
+            self._connection.commit()
+
+    _ERROR_LOG_MAX_ROWS = 50
+
+    def log_error(self, source: str, message: str, *, image_id: str | None = None) -> None:
+        ts = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO error_log (timestamp, source, message, image_id) VALUES (?, ?, ?, ?)",
+                (ts, source, message, image_id),
+            )
+            self._connection.execute(
+                "DELETE FROM error_log WHERE id NOT IN (SELECT id FROM error_log ORDER BY id DESC LIMIT ?)",
+                (self._ERROR_LOG_MAX_ROWS,),
+            )
+            self._connection.commit()
+
+    def get_recent_errors(self, limit: int = 5) -> list[dict[str, str | None]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT timestamp, source, message, image_id FROM error_log ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def clear_error_log(self) -> None:
+        with self._lock:
+            self._connection.execute("DELETE FROM error_log")
             self._connection.commit()
 
     @staticmethod

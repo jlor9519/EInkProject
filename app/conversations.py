@@ -653,6 +653,7 @@ async def _render_image(
     except OSError as exc:
         record.status = "failed"
         record.last_error = f"Failed to render image: {exc}"
+        services.database.log_error("render", str(exc), image_id=record.image_id)
         return record, warnings
     record.local_rendered_path = str(rendered_path)
     return record, warnings
@@ -682,6 +683,7 @@ async def _display_rendered_image(
 
     if not display_result.success:
         logger.warning("Display failed for image %s: %s", record.image_id, display_result.message)
+        services.database.log_error("display", display_result.message, image_id=record.image_id)
         record.status = "display_failed"
         record.last_error = display_result.message
         return record, warnings

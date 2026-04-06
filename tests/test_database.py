@@ -760,5 +760,71 @@ class DatabaseTests(unittest.TestCase):
             self.assertTrue(database.is_image_in_rotation_pool("img-1", "horizontal"))
 
 
+class ErrorLogTests(unittest.TestCase):
+    def test_log_error_and_get_recent_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "frame.db")
+            db.initialize()
+
+            db.log_error("display", "timeout after 30s", image_id="img-1")
+            db.log_error("telegram", "httpx.ReadError")
+
+            errors = db.get_recent_errors(limit=5)
+            self.assertEqual(len(errors), 2)
+            self.assertEqual(errors[0]["source"], "telegram")
+            self.assertEqual(errors[1]["source"], "display")
+            self.assertEqual(errors[1]["image_id"], "img-1")
+            self.assertIsNone(errors[0]["image_id"])
+            db.close()
+
+    def test_get_recent_errors_respects_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "frame.db")
+            db.initialize()
+
+            for i in range(10):
+                db.log_error("test", f"error {i}")
+
+            errors = db.get_recent_errors(limit=3)
+            self.assertEqual(len(errors), 3)
+            self.assertEqual(errors[0]["message"], "error 9")
+            db.close()
+
+    def test_log_error_prunes_beyond_max_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "frame.db")
+            db.initialize()
+
+            for i in range(60):
+                db.log_error("test", f"error {i}")
+
+            all_errors = db.get_recent_errors(limit=100)
+            self.assertEqual(len(all_errors), 50)
+            self.assertEqual(all_errors[0]["message"], "error 59")
+            self.assertEqual(all_errors[-1]["message"], "error 10")
+            db.close()
+
+    def test_clear_error_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "frame.db")
+            db.initialize()
+
+            db.log_error("display", "some error")
+            db.clear_error_log()
+
+            errors = db.get_recent_errors()
+            self.assertEqual(len(errors), 0)
+            db.close()
+
+    def test_get_recent_errors_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "frame.db")
+            db.initialize()
+
+            errors = db.get_recent_errors()
+            self.assertEqual(errors, [])
+            db.close()
+
+
 if __name__ == "__main__":
     unittest.main()

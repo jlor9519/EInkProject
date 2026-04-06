@@ -189,6 +189,13 @@ async def _render_status_text(services: AppServices) -> str:
     if backend_diagnostics["degraded"]:
         warnings.append(str(backend_diagnostics["message"]))
 
+    recent_errors = services.database.get_recent_errors(limit=5)
+    error_lines: list[str] = []
+    for err in recent_errors:
+        ts = err["timestamp"][:16].replace("T", " ")
+        msg = err["message"][:80]
+        error_lines.append(f"- [{ts}] {err['source']}: {msg}")
+
     return "\n".join(
         [
             "Fotorahmen-Status",
@@ -205,6 +212,15 @@ async def _render_status_text(services: AppServices) -> str:
                     *(f"- {warning}" for warning in warnings),
                 ]
                 if warnings
+                else []
+            ),
+            *(
+                [
+                    "",
+                    "Letzte Fehler:",
+                    *error_lines,
+                ]
+                if error_lines
                 else []
             ),
             "",
@@ -566,9 +582,13 @@ async def _display_target(services: AppServices, target: ImageRecord) -> Display
             fit_mode=fit_mode,
         )
 
-        return await asyncio.to_thread(services.display.display, display_request)
+        result = await asyncio.to_thread(services.display.display, display_request)
+        if not result.success:
+            services.database.log_error("display", result.message, image_id=target.image_id)
+        return result
     except Exception as exc:
         logger.exception("Display target failed unexpectedly for %s", target.image_id)
+        services.database.log_error("display", str(exc), image_id=target.image_id)
         return DisplayResult(False, str(exc))
 
 

@@ -56,6 +56,12 @@ async def _application_error_handler(update: object, context) -> None:
         logger.error("Unhandled Telegram application error without exception context")
         return
 
+    application = getattr(context, "application", None)
+    if application is not None:
+        services = application.bot_data.get("services")
+        if services is not None:
+            services.database.log_error("telegram", str(error))
+
     update_id = getattr(update, "update_id", None)
     if update_id is None:
         logger.error(

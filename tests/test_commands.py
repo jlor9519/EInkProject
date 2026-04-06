@@ -1001,6 +1001,32 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("/restart", reply)
         self.assertNotIn("/update", reply)
 
+    async def test_status_shows_recent_errors_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            services.database.log_error("display", "InkyPi update_now request timed out after 30 seconds")
+            services.database.log_error("telegram", "httpx.ReadError")
+            update = _MessageUpdate(user_id=7)
+            context = _FakeContext(services)
+
+            await status_command(update, context)
+
+            text = update.effective_message.replies[0]
+            self.assertIn("Letzte Fehler:", text)
+            self.assertIn("display:", text)
+            self.assertIn("telegram:", text)
+
+    async def test_status_omits_errors_section_when_log_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            update = _MessageUpdate(user_id=7)
+            context = _FakeContext(services)
+
+            await status_command(update, context)
+
+            text = update.effective_message.replies[0]
+            self.assertNotIn("Letzte Fehler:", text)
+
     async def test_status_command_adds_admin_quick_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             services = _build_services(Path(tmpdir), is_admin=True)
