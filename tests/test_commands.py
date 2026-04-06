@@ -1027,6 +1027,28 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             text = update.effective_message.replies[0]
             self.assertNotIn("Letzte Fehler:", text)
 
+    async def test_status_omits_errors_older_than_one_hour(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            # Insert an error with a timestamp 2 hours in the past
+            from datetime import datetime, timedelta, timezone
+
+            old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+            with services.database._lock:
+                services.database._connection.execute(
+                    "INSERT INTO error_log (timestamp, source, message) VALUES (?, ?, ?)",
+                    (old_ts, "display", "old failure"),
+                )
+                services.database._connection.commit()
+            update = _MessageUpdate(user_id=7)
+            context = _FakeContext(services)
+
+            await status_command(update, context)
+
+            text = update.effective_message.replies[0]
+            self.assertNotIn("Letzte Fehler:", text)
+            self.assertNotIn("old failure", text)
+
     async def test_status_command_adds_admin_quick_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             services = _build_services(Path(tmpdir), is_admin=True)

@@ -189,7 +189,10 @@ async def _render_status_text(services: AppServices) -> str:
     if backend_diagnostics["degraded"]:
         warnings.append(str(backend_diagnostics["message"]))
 
-    recent_errors = services.database.get_recent_errors(limit=5)
+    from datetime import datetime, timedelta, timezone
+
+    one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    recent_errors = services.database.get_recent_errors(limit=5, since=one_hour_ago)
     error_lines: list[str] = []
     for err in recent_errors:
         ts = err["timestamp"][:16].replace("T", " ")

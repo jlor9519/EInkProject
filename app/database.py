@@ -902,12 +902,19 @@ class Database:
             )
             self._connection.commit()
 
-    def get_recent_errors(self, limit: int = 5) -> list[dict[str, str | None]]:
+    def get_recent_errors(self, limit: int = 5, *, since: str | None = None) -> list[dict[str, str | None]]:
         with self._lock:
-            rows = self._connection.execute(
-                "SELECT timestamp, source, message, image_id FROM error_log ORDER BY id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if since is not None:
+                rows = self._connection.execute(
+                    "SELECT timestamp, source, message, image_id FROM error_log "
+                    "WHERE timestamp >= ? ORDER BY id DESC LIMIT ?",
+                    (since, limit),
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    "SELECT timestamp, source, message, image_id FROM error_log ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
         return [dict(row) for row in rows]
 
     def clear_error_log(self) -> None:
