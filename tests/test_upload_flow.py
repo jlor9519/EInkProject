@@ -399,6 +399,54 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["image_id"], "img-1")
             self.assertTrue(services.display.backend_diagnostics()["degraded"])
 
+    async def test_process_queued_upload_does_not_mark_displayed_when_restart_recovery_cannot_verify_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services_with_real_adapter(
+                tmpdir_path,
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            application = _FakeApplication(services)
+
+            original = services.storage.original_path("img-1")
+            original.parent.mkdir(parents=True, exist_ok=True)
+            original.write_bytes(b"original")
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=555,
+                    local_original_path=str(original),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="queued",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ), patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="active", stderr=""),
+            ), patch.object(
+                services.display,
+                "_wait_for_inkypi_http_ready",
+                return_value="connection refused",
+            ):
+                await process_queued_upload(application, "img-1")
+
+            record = services.database.get_image_by_id("img-1")
+            self.assertEqual(record.status, "display_failed")
+            self.assertIn("Anzeige konnte nicht aktualisiert werden", application.bot.messages[0][1])
+            self.assertFalse(services.config.storage.current_payload_path.exists())
+
 
 class _FakeAuth:
     def sync_user(self, user) -> None:
@@ -589,7 +637,12 @@ def _build_services(
     )
 
 
-def _build_services_with_real_adapter(base_dir: Path, *, bot: _FakeBot | None = None):
+def _build_services_with_real_adapter(
+    base_dir: Path,
+    *,
+    bot: _FakeBot | None = None,
+    refresh_command: str = "echo refresh",
+):
     database = Database(base_dir / "photo_frame.db")
     database.initialize()
     storage = _FakeStorage(base_dir)
@@ -626,7 +679,7 @@ def _build_services_with_real_adapter(base_dir: Path, *, bot: _FakeBot | None = 
         payload_dir=base_dir / "inkypi",
         update_method="http_update_now",
         update_now_url="http://127.0.0.1/update_now",
-        refresh_command="echo refresh",
+        refresh_command=refresh_command,
     )
     device_config_path = base_dir / "InkyPi" / "src" / "config" / "device.json"
     device_config_path.parent.mkdir(parents=True, exist_ok=True)

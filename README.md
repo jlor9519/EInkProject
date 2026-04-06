@@ -26,6 +26,8 @@ By default, the setup expects the standard upstream InkyPi layout:
 4. The app renders a captioned RGB bridge image and writes a canonical bridge payload.
 5. The app triggers InkyPi, using the local `update_now` HTTP endpoint first when configured and
    falling back to the configured refresh command if the HTTP refresh hangs or is unreachable.
+   In `http_update_now` mode, a recovery command only counts as success after a verified follow-up
+   refresh is accepted by InkyPi again.
 6. The custom InkyPi plugin reads the bridge payload and returns a `PIL.Image` for display.
 7. The app stores the result in SQLite.
 
@@ -135,4 +137,5 @@ That runner uses isolated state under `telegram-bot-test/`, mocks display refres
 - The default render size is `800x480`.
 - The default InkyPi source checkout path is `~/InkyPi`, and the default runtime install path is `/usr/local/inkypi`.
 - `inkypi.refresh_command` is used as the primary trigger in `command` mode and as the automatic recovery fallback when `http_update_now` is configured but the local HTTP refresh path is unhealthy.
+- The default fallback `sudo systemctl restart inkypi.service` is treated as a recovery action in `http_update_now` mode. The app only reports a successful display after InkyPi becomes reachable again and accepts a verified refresh for the target payload.
 - Exact InkyPi refresh behavior is intentionally configurable because the validated local command may differ between installations.

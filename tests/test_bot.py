@@ -10,7 +10,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from app.bot import LAST_HANDLED_BOOT_ID_KEY, UPLOAD_QUEUE_KEY, _maybe_advance_after_boot, _post_init
+from telegram.error import NetworkError
+
+from app.bot import (
+    LAST_HANDLED_BOOT_ID_KEY,
+    UPLOAD_QUEUE_KEY,
+    _application_error_handler,
+    _maybe_advance_after_boot,
+    _post_init,
+)
 from app.database import Database
 from app.models import DisplayResult, ImageRecord
 
@@ -185,6 +193,28 @@ class BootAdvanceTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(services.display.display_calls, ["img-2"])
             self.assertEqual(services.database.get_setting(LAST_HANDLED_BOOT_ID_KEY), "boot-command")
+
+
+class ErrorHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_application_error_handler_logs_polling_network_errors_as_warning(self) -> None:
+        context = SimpleNamespace(error=NetworkError("httpx.ReadError: boom"))
+
+        with patch("app.bot.logger") as mock_logger:
+            await _application_error_handler(None, context)
+
+        mock_logger.warning.assert_called_once()
+        mock_logger.error.assert_not_called()
+
+    async def test_application_error_handler_logs_non_network_errors_with_traceback(self) -> None:
+        error = RuntimeError("boom")
+        context = SimpleNamespace(error=error)
+        update = SimpleNamespace(update_id=123)
+
+        with patch("app.bot.logger") as mock_logger:
+            await _application_error_handler(update, context)
+
+        mock_logger.error.assert_called_once()
+        mock_logger.warning.assert_not_called()
 
 
 class _FakeDisplay:

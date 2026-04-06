@@ -166,7 +166,7 @@ async def _render_status_text(services: AppServices) -> str:
     image_lines = [
         f"- Bibliothek: {format_orientation_label(active_orientation)}",
         f"- In Rotation: {rotation_count} {'Bild' if rotation_count == 1 else 'Bilder'}",
-        f"- Außerhalb der Rotation gespeichert: {hidden_count}",
+        f"- Neue Bilder in Warteliste: {hidden_count}",
         f"- Davon aktuell angezeigt: {displayed_count} {'Bild' if displayed_count == 1 else 'Bilder'}",
         f"- Aktuelles Bild: {_format_duration(displayed_at)}",
     ]
@@ -243,7 +243,7 @@ async def _render_list_text(services: AppServices) -> str:
         lines.append(f"{current_label} (aktuell angezeigt, nicht Teil der aktuellen Bibliothek)")
     else:
         lines.append(f"{current_label}")
-    lines.append(f"Außerhalb der Rotation gespeichert: {hidden_count}")
+    lines.append(f"Neue Bilder in Warteliste: {hidden_count}")
 
     interval = await asyncio.to_thread(services.display.get_slideshow_interval)
 

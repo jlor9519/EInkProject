@@ -4,6 +4,7 @@ import asyncio
 import logging
 from pathlib import Path
 
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from app.slideshow import schedule_slideshow_job
@@ -39,6 +40,35 @@ UPLOAD_QUEUE_KEY = "upload_queue"
 UPLOAD_WORKER_TASK_KEY = "upload_worker_task"
 LAST_HANDLED_BOOT_ID_KEY = "last_handled_boot_id"
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+
+
+def _exc_info_tuple(error: BaseException) -> tuple[type[BaseException], BaseException, object]:
+    return (type(error), error, error.__traceback__)
+
+
+async def _application_error_handler(update: object, context) -> None:
+    error = context.error
+    if isinstance(error, (NetworkError, TimedOut)) and update is None:
+        logger.warning("Telegram polling network error; retrying: %s", error)
+        return
+
+    if error is None:
+        logger.error("Unhandled Telegram application error without exception context")
+        return
+
+    update_id = getattr(update, "update_id", None)
+    if update_id is None:
+        logger.error(
+            "Unhandled Telegram application error without update context",
+            exc_info=_exc_info_tuple(error),
+        )
+        return
+
+    logger.error(
+        "Unhandled Telegram application error while processing update %s",
+        update_id,
+        exc_info=_exc_info_tuple(error),
+    )
 
 
 def _read_current_boot_id(path: Path = BOOT_ID_PATH) -> str | None:
@@ -151,6 +181,7 @@ def build_application(services: AppServices) -> Application:
     application.bot_data[UPLOAD_QUEUE_KEY] = asyncio.Queue()
     application.post_init = _post_init
     application.post_shutdown = _post_shutdown
+    application.add_error_handler(_application_error_handler)
 
     application.add_handler(build_photo_conversation())
     application.add_handler(build_settings_conversation())

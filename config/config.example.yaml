@@ -41,4 +41,4 @@ inkypi:
   payload_dir: data/inkypi
   update_method: http_update_now    # http_update_now or command
   update_now_url: http://127.0.0.1/update_now
-  refresh_command: sudo systemctl restart inkypi.service  # primary trigger in command mode, HTTP fallback recovery in http_update_now mode
+  refresh_command: sudo systemctl restart inkypi.service  # primary trigger in command mode; recovery command in http_update_now mode and only counted successful after verified refresh

@@ -92,6 +92,7 @@ class MainTests(unittest.TestCase):
             application = build_application(services)
 
             self.assertIsNotNone(application)
+            self.assertTrue(application.error_handlers)
             database.close()
 
 

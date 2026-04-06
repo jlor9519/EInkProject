@@ -15,6 +15,7 @@ from urllib import error, parse, request
 
 logger = logging.getLogger(__name__)
 
+from app.config import LEGACY_RESTART_REFRESH_COMMAND
 from app.inkypi_paths import resolve_inkypi_layout
 from app.models import (
     DeviceSettingsApplyResult,
@@ -357,10 +358,33 @@ class InkyPiAdapter:
                     primary_plugin_payload_path=primary_plugin_payload_path,
                 )
                 if command_result.success:
+                    if self._command_requires_verified_http_success():
+                        verify_result = self._verify_http_refresh_after_recovery_command(payload_path)
+                        if verify_result.success:
+                            self._clear_http_backend_degraded()
+                            logger.info(
+                                "Recovery command succeeded and verified refresh completed while HTTP backend was degraded"
+                            )
+                            return DisplayResult(
+                                True,
+                                (
+                                    "verified refresh succeeded after recovery command while HTTP backend was degraded: "
+                                    f"{verify_result.message}"
+                                ),
+                            )
+                        self._restore_primary_plugin_payload_if_needed(
+                            payload_path,
+                            primary_plugin_payload_path,
+                        )
+                        return DisplayResult(
+                            False,
+                            (
+                                "InkyPi HTTP backend ist derzeit gestört "
+                                f"({self._http_degraded_reason}); recovery command succeeded, "
+                                f"but verified refresh failed: {verify_result.message}"
+                            ),
+                        )
                     logger.info("Display refresh succeeded via command fallback while HTTP backend was degraded")
-                    retry_result = self._retry_http_post_after_fallback(payload_path)
-                    if retry_result and retry_result.success:
-                        self._clear_http_backend_degraded()
                     return DisplayResult(
                         True,
                         f"command fallback used while HTTP backend was degraded: {command_result.message}",
@@ -388,11 +412,41 @@ class InkyPiAdapter:
                     primary_plugin_payload_path=primary_plugin_payload_path,
                 )
                 if command_result.success:
+                    if self._command_requires_verified_http_success():
+                        verify_result = self._verify_http_refresh_after_recovery_command(payload_path)
+                        if verify_result.success:
+                            self._clear_http_backend_degraded()
+                            logger.warning(
+                                "Display refresh recovered after HTTP failure and verified refresh succeeded: %s",
+                                http_result.message,
+                            )
+                            return DisplayResult(
+                                True,
+                                (
+                                    f"HTTP refresh failed ({http_result.message}); recovery command succeeded "
+                                    f"and verified refresh completed: {verify_result.message}"
+                                ),
+                            )
+                        self._restore_primary_plugin_payload_if_needed(
+                            payload_path,
+                            primary_plugin_payload_path,
+                        )
+                        logger.warning(
+                            "Recovery command ran after HTTP failure, but verified refresh still failed: %s | %s",
+                            http_result.message,
+                            verify_result.message,
+                        )
+                        return DisplayResult(
+                            False,
+                            (
+                                f"HTTP refresh failed: {http_result.message}; recovery command ran, "
+                                f"but verified refresh failed: {verify_result.message}"
+                            ),
+                        )
                     logger.warning(
                         "Display refresh recovered via command fallback after HTTP failure: %s",
                         http_result.message,
                     )
-                    self._retry_http_post_after_fallback(payload_path)
                     return DisplayResult(
                         True,
                         f"HTTP refresh failed ({http_result.message}); command fallback succeeded: {command_result.message}",
@@ -495,20 +549,34 @@ class InkyPiAdapter:
         except OSError as exc:
             return DisplayResult(False, f"InkyPi update_now request failed: {exc}"), True
 
-    def _retry_http_post_after_fallback(self, payload_path: Path) -> DisplayResult | None:
-        """Sleep briefly after a command fallback restart, then retry the HTTP POST.
+    def _verify_http_refresh_after_recovery_command(self, payload_path: Path) -> DisplayResult:
+        logger.info("Recovery command completed; waiting for InkyPi HTTP readiness before verifying refresh")
+        readiness_error = self._wait_for_inkypi_http_ready()
+        if readiness_error is not None:
+            logger.warning(
+                "Recovery command completed, but the InkyPi web server did not become ready: %s",
+                readiness_error,
+            )
+            return DisplayResult(
+                False,
+                (
+                    "InkyPi recovery command ausgeführt, aber der InkyPi-Webserver war noch nicht erreichbar: "
+                    f"{readiness_error}"
+                ),
+            )
 
-        Returns the retry DisplayResult on success, or None if the retry failed.
-        This ensures InkyPi actually picks up the new payload after a service restart.
-        """
-        logger.info("Waiting 5s for InkyPi to come back up before retrying HTTP POST")
-        time.sleep(5)
         retry_result, _ = self._post_update_now(payload_path)
         if retry_result.success:
-            logger.info("HTTP POST succeeded after command fallback restart")
+            logger.info("Verified HTTP refresh succeeded after recovery command")
             return retry_result
-        logger.warning("HTTP POST retry after command fallback also failed: %s", retry_result.message)
-        return None
+        logger.warning("Verified HTTP refresh after recovery command failed: %s", retry_result.message)
+        return DisplayResult(
+            False,
+            (
+                "InkyPi recovery command ausgeführt, aber die verifizierte Anzeige-Aktualisierung ist fehlgeschlagen: "
+                f"{retry_result.message}"
+            ),
+        )
 
     def _parse_http_response(self, body: str, status_code: int) -> DisplayResult:
         text = body.strip()
@@ -970,6 +1038,12 @@ class InkyPiAdapter:
         )
         return shlex.split(command)
 
+    def _command_requires_verified_http_success(self) -> bool:
+        return (
+            self.config.update_method == "http_update_now"
+            and self.config.refresh_command.strip() == LEGACY_RESTART_REFRESH_COMMAND
+        )
+
     def _has_refresh_command(self) -> bool:
         return bool(self.config.refresh_command.strip())
 
@@ -986,6 +1060,21 @@ class InkyPiAdapter:
             not self._refresh_command_uses_explicit_paths()
             and payload_path != primary_plugin_payload_path
         )
+
+    def _restore_primary_plugin_payload_if_needed(
+        self,
+        payload_path: Path,
+        primary_plugin_payload_path: Path,
+    ) -> None:
+        if not self._command_needs_temporary_plugin_payload(payload_path, primary_plugin_payload_path):
+            return
+        restore_result = self._sync_active_plugin_instance(primary_plugin_payload_path)
+        if restore_result is not None:
+            logger.warning(
+                "Failed to restore Telegram Frame plugin payload to %s after failed recovery verification: %s",
+                primary_plugin_payload_path,
+                restore_result.message,
+            )
 
     def _mark_http_backend_degraded(self, reason: str) -> None:
         self._http_degraded_until_monotonic = time.monotonic() + HTTP_DEGRADED_COOLDOWN_SECONDS

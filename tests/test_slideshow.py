@@ -141,7 +141,7 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
 
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["image_id"], "img-3")
-            self.assertEqual(mock_http.call_count, 3)
+            self.assertEqual(mock_http.call_count, 1)
             self.assertEqual(mock_command.call_count, 2)
             self.assertNotEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
 
@@ -149,6 +149,39 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
             command_context = _CommandContext(services)
             await list_command(update, command_context)
             self.assertIn('"img-3"', update.effective_message.replies[0])
+
+    async def test_auto_advance_stays_in_display_error_when_restart_recovery_cannot_verify_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services_with_real_adapter(
+                tmpdir_path,
+                interval_seconds=7200,
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            _seed_displayed_images(tmpdir_path, services, ["img-1", "img-2"])
+            context = _JobContext(services)
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ), patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="active", stderr=""),
+            ), patch.object(
+                services.display,
+                "_wait_for_inkypi_http_ready",
+                return_value="connection refused",
+            ):
+                await _advance_slideshow(context)
+
+            payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-1")
+            self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
+
+            update = _MessageUpdate()
+            command_context = _CommandContext(services)
+            await list_command(update, command_context)
+            self.assertIn('"img-1"', update.effective_message.replies[0])
 
     async def test_auto_advance_ignores_images_hidden_by_rotation_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -361,7 +394,7 @@ def _build_services(base_dir: Path, *, interval_seconds: int):
     )
 
 
-def _build_services_with_real_adapter(base_dir: Path, *, interval_seconds: int):
+def _build_services_with_real_adapter(base_dir: Path, *, interval_seconds: int, refresh_command: str = "echo refresh"):
     database = Database(base_dir / "photo_frame.db")
     database.initialize()
     storage_config = StorageConfig(
@@ -397,7 +430,7 @@ def _build_services_with_real_adapter(base_dir: Path, *, interval_seconds: int):
         payload_dir=base_dir / "inkypi",
         update_method="http_update_now",
         update_now_url="http://127.0.0.1/update_now",
-        refresh_command="echo refresh",
+        refresh_command=refresh_command,
     )
     device_config_path = base_dir / "InkyPi" / "src" / "config" / "device.json"
     device_config_path.parent.mkdir(parents=True, exist_ok=True)

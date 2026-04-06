@@ -272,9 +272,9 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("Bibliothek: Hochformat", update_status.effective_message.replies[0])
             self.assertIn("In Rotation: 3 Bilder", update_status.effective_message.replies[0])
-            self.assertIn("Außerhalb der Rotation gespeichert: 0", update_status.effective_message.replies[0])
+            self.assertIn("Neue Bilder in Warteliste: 0", update_status.effective_message.replies[0])
             self.assertIn("Warteschlange: 1 neues Bild wartend", update_status.effective_message.replies[0])
-            self.assertIn("Außerhalb der Rotation gespeichert: 0", update_list.effective_message.replies[0])
+            self.assertIn("Neue Bilder in Warteliste: 0", update_list.effective_message.replies[0])
             self.assertIn("Bilderliste Hochformat (2 gesamt)", update_list.effective_message.replies[0])
             self.assertIn("Horizontal", update_list.effective_message.replies[0])
             self.assertIn("nicht Teil der aktuellen Bibliothek", update_list.effective_message.replies[0])
@@ -317,10 +317,10 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             await list_command(update_list, context)
 
             self.assertIn("In Rotation: 2 Bilder", update_status.effective_message.replies[0])
-            self.assertIn("Außerhalb der Rotation gespeichert: 1", update_status.effective_message.replies[0])
+            self.assertIn("Neue Bilder in Warteliste: 1", update_status.effective_message.replies[0])
             self.assertIn("img-old", update_list.effective_message.replies[0])
             self.assertIn("nicht Teil der aktuellen Bibliothek", update_list.effective_message.replies[0])
-            self.assertIn("Außerhalb der Rotation gespeichert: 1", update_list.effective_message.replies[0])
+            self.assertIn("Neue Bilder in Warteliste: 1", update_list.effective_message.replies[0])
             self.assertIn('"img-mid"', update_list.effective_message.replies[0])
             self.assertIn('"img-new"', update_list.effective_message.replies[0])
 
@@ -362,8 +362,8 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             await list_command(update_list, context)
 
             self.assertIn("In Rotation: 3 Bilder", update_status.effective_message.replies[0])
-            self.assertIn("Außerhalb der Rotation gespeichert: 0", update_status.effective_message.replies[0])
-            self.assertIn("Außerhalb der Rotation gespeichert: 0", update_list.effective_message.replies[0])
+            self.assertIn("Neue Bilder in Warteliste: 0", update_status.effective_message.replies[0])
+            self.assertIn("Neue Bilder in Warteliste: 0", update_list.effective_message.replies[0])
 
     async def test_list_self_heals_stale_interval_timer_and_shows_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -839,6 +839,88 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["image_id"], "img-prev")
 
+    async def test_next_keeps_current_image_when_restart_recovery_cannot_verify_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services_with_real_adapter(
+                tmpdir_path,
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            _seed_real_adapter_image(tmpdir_path, services, "img-current", created_at="2026-03-18T12:00:00+00:00")
+            _seed_real_adapter_image(tmpdir_path, services, "img-next", created_at="2026-03-18T12:05:00+00:00")
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-current"}),
+                encoding="utf-8",
+            )
+            services.config.storage.current_image_path.write_bytes(b"img-current")
+
+            update_next = _MessageUpdate()
+            context = _FakeContext(services, with_job_queue=True)
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ), patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="active", stderr=""),
+            ), patch.object(
+                services.display,
+                "_wait_for_inkypi_http_ready",
+                return_value="connection refused",
+            ):
+                await next_command(update_next, context)
+
+            self.assertEqual(
+                update_next.effective_message.replies[-1],
+                "Display nicht erreichbar. Bitte prüfe die Verbindung zum Pi.",
+            )
+            payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-current")
+
+            update_list = _MessageUpdate()
+            await list_command(update_list, context)
+            self.assertIn('"img-current"', update_list.effective_message.replies[0])
+
+    async def test_prev_keeps_current_image_when_restart_recovery_cannot_verify_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services_with_real_adapter(
+                tmpdir_path,
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            _seed_real_adapter_image(tmpdir_path, services, "img-prev", created_at="2026-03-18T11:55:00+00:00")
+            _seed_real_adapter_image(tmpdir_path, services, "img-current", created_at="2026-03-18T12:00:00+00:00")
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-current"}),
+                encoding="utf-8",
+            )
+            services.config.storage.current_image_path.write_bytes(b"img-current")
+
+            update = _MessageUpdate()
+            context = _FakeContext(services, with_job_queue=True)
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ), patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="active", stderr=""),
+            ), patch.object(
+                services.display,
+                "_wait_for_inkypi_http_ready",
+                return_value="connection refused",
+            ):
+                await prev_command(update, context)
+
+            self.assertEqual(
+                update.effective_message.replies[-1],
+                "Display nicht erreichbar. Bitte prüfe die Verbindung zum Pi.",
+            )
+            payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-current")
+
     async def test_refresh_uses_command_fallback_after_http_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -864,6 +946,39 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             status_update = _MessageUpdate()
             await status_command(status_update, context)
             self.assertIn("Befehl-Fallback aktiv", status_update.effective_message.replies[0])
+
+    async def test_refresh_reports_failure_when_restart_recovery_cannot_verify_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services_with_real_adapter(
+                tmpdir_path,
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            services.config.storage.current_payload_path.write_text(
+                json.dumps({"image_id": "img-current", "orientation_hint": "horizontal"}),
+                encoding="utf-8",
+            )
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            with patch(
+                "app.inkypi_adapter.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ), patch(
+                "app.inkypi_adapter.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="active", stderr=""),
+            ), patch.object(
+                services.display,
+                "_wait_for_inkypi_http_ready",
+                return_value="connection refused",
+            ):
+                await refresh_command(update, context)
+
+            self.assertEqual(
+                update.effective_message.replies[-1],
+                "Display nicht erreichbar. Bitte prüfe die Verbindung zum Pi.",
+            )
 
     async def test_help_command_adds_quick_actions_and_admin_settings_button(self) -> None:
         services = _build_services(Path(tempfile.mkdtemp()), is_admin=True)
@@ -1223,7 +1338,7 @@ class _CopyingRenderer:
         return output_path
 
 
-def _build_services_with_real_adapter(base_dir: Path):
+def _build_services_with_real_adapter(base_dir: Path, *, refresh_command: str = "echo refresh"):
     database = Database(base_dir / "photo_frame.db")
     database.initialize()
     storage_config = StorageConfig(
@@ -1259,7 +1374,7 @@ def _build_services_with_real_adapter(base_dir: Path):
         payload_dir=base_dir / "inkypi",
         update_method="http_update_now",
         update_now_url="http://127.0.0.1/update_now",
-        refresh_command="echo refresh",
+        refresh_command=refresh_command,
     )
     device_config_path = base_dir / "InkyPi" / "src" / "config" / "device.json"
     device_config_path.parent.mkdir(parents=True, exist_ok=True)
