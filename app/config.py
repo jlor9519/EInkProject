@@ -28,6 +28,8 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 DEFAULT_UPDATE_METHOD = "http_update_now"
 DEFAULT_UPDATE_NOW_URL = "http://127.0.0.1/update_now"
+DEFAULT_UPDATE_NOW_TIMEOUT_SECONDS = 120
+DEFAULT_REFRESH_COMMAND_TIMEOUT_SECONDS = 150
 LEGACY_RESTART_REFRESH_COMMAND = "sudo systemctl restart inkypi.service"
 LEGACY_CAPTION_HEIGHT = 132
 LEGACY_CAPTION_FONT_SIZE = 28
@@ -160,6 +162,16 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         update_method=update_method,
         update_now_url=update_now_url,
         refresh_command=refresh_command,
+        update_now_timeout_seconds=_parse_positive_int(
+            inkypi_section.get("update_now_timeout_seconds", DEFAULT_UPDATE_NOW_TIMEOUT_SECONDS),
+            "inkypi.update_now_timeout_seconds",
+            errors,
+        ),
+        refresh_command_timeout_seconds=_parse_positive_int(
+            inkypi_section.get("refresh_command_timeout_seconds", DEFAULT_REFRESH_COMMAND_TIMEOUT_SECONDS),
+            "inkypi.refresh_command_timeout_seconds",
+            errors,
+        ),
     )
 
     if errors:

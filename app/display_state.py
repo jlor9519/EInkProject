@@ -5,7 +5,10 @@ import logging
 from pathlib import Path
 
 from app.database import utcnow_iso
-from app.models import ImageRecord
+from app.models import (
+    DISPLAY_VERIFICATION_VERIFIED,
+    ImageRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +20,8 @@ DISPLAY_TRANSITION_KEYS = (
     DISPLAY_TRANSITION_STARTED_AT_KEY,
     DISPLAY_TRANSITION_KIND_KEY,
 )
+CURRENT_IMAGE_VERIFICATION_STATE_KEY = "current_image_verification_state"
+CURRENT_IMAGE_VERIFICATION_DETAIL_KEY = "current_image_verification_detail"
 
 
 def read_current_payload_image_id(payload_path: Path) -> str | None:
@@ -50,11 +55,15 @@ def commit_display_success(
     record: ImageRecord,
     *,
     mark_new_image: bool,
+    verification_state: str = DISPLAY_VERIFICATION_VERIFIED,
+    verification_detail: str | None = None,
     displayed_at: str | None = None,
 ) -> str:
     timestamp = displayed_at or utcnow_iso()
     settings: dict[str, str | None] = {
         "current_image_displayed_at": timestamp,
+        CURRENT_IMAGE_VERIFICATION_STATE_KEY: verification_state,
+        CURRENT_IMAGE_VERIFICATION_DETAIL_KEY: verification_detail,
     }
     if mark_new_image:
         settings["last_new_image_displayed_at"] = timestamp

@@ -12,6 +12,8 @@ from telegram.ext import ContextTypes
 
 from app.auth import require_admin, require_whitelist
 from app.display_state import (
+    CURRENT_IMAGE_VERIFICATION_DETAIL_KEY,
+    CURRENT_IMAGE_VERIFICATION_STATE_KEY,
     DISPLAY_TRANSITION_KEYS,
     begin_display_transition,
     clear_display_transition,
@@ -19,7 +21,13 @@ from app.display_state import (
     read_current_payload_image_id,
 )
 from app.fs_utils import safe_unlink
-from app.models import AppServices, DisplayRequest, DisplayResult, ImageRecord
+from app.models import (
+    DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY,
+    AppServices,
+    DisplayRequest,
+    DisplayResult,
+    ImageRecord,
+)
 from app.orientation import format_orientation_label
 
 COMMAND_CALLBACK_PREFIX = "cmd|"
@@ -117,6 +125,26 @@ def _build_help_text(is_admin: bool) -> str:
     return "\n".join(lines)
 
 
+def _current_display_verification(services: AppServices) -> tuple[str | None, str | None]:
+    state = services.database.get_setting(CURRENT_IMAGE_VERIFICATION_STATE_KEY) or None
+    detail = services.database.get_setting(CURRENT_IMAGE_VERIFICATION_DETAIL_KEY) or None
+    return state, detail
+
+
+def _is_assumed_display_result(result: DisplayResult) -> bool:
+    return result.verification_state == DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY
+
+
+def _assumed_display_warning(detail: str | None = None) -> str:
+    return detail or "Anzeige wurde vermutlich aktualisiert, konnte aber nicht vollständig verifiziert werden."
+
+
+def _format_success_reply(base_text: str, result: DisplayResult) -> str:
+    if not _is_assumed_display_result(result):
+        return base_text
+    return f"{base_text} (Anzeige nicht vollständig verifiziert)"
+
+
 async def _render_status_text(services: AppServices) -> str:
     active_orientation = get_active_orientation(services)
 
@@ -188,6 +216,9 @@ async def _render_status_text(services: AppServices) -> str:
         warnings.append(str(runtime_diagnostics["message"]))
     if backend_diagnostics["degraded"]:
         warnings.append(str(backend_diagnostics["message"]))
+    verification_state, verification_detail = _current_display_verification(services)
+    if verification_state == DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY:
+        warnings.append(_assumed_display_warning(verification_detail))
 
     from datetime import datetime, timedelta, timezone
 
@@ -258,10 +289,16 @@ async def _render_list_text(services: AppServices) -> str:
 
     current_record = services.database.get_image_by_id(current_image_id)
     current_label = _image_label(current_record) if current_record else "(unbekannt)"
+    verification_state, verification_detail = _current_display_verification(services)
     if current_record and not current_in_rotation:
-        lines.append(f"{current_label} (aktuell angezeigt, nicht Teil der aktuellen Bibliothek)")
+        current_line = f"{current_label} (aktuell angezeigt, nicht Teil der aktuellen Bibliothek)"
     else:
-        lines.append(f"{current_label}")
+        current_line = f"{current_label}"
+    if verification_state == DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY:
+        current_line += " [unverifiziert]"
+    lines.append(current_line)
+    if verification_state == DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY:
+        lines.append(f"Hinweis: {_assumed_display_warning(verification_detail)}")
     lines.append(f"Neue Bilder in Warteliste: {hidden_count}")
 
     interval = await asyncio.to_thread(services.display.get_slideshow_interval)
@@ -419,9 +456,16 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     async with lock:
         services = get_services(context)
         result = await asyncio.to_thread(services.display.refresh_only)
-        await update.effective_message.reply_text(
-            "Aktualisierung ausgelöst." if result.success else _friendly_display_error(result.message)
-        )
+        if result.success:
+            reply_text = "Aktualisierung ausgelöst."
+            if _is_assumed_display_result(result):
+                reply_text = (
+                    "Aktualisierung wahrscheinlich erfolgreich, aber die Anzeige konnte nicht vollständig "
+                    "verifiziert werden."
+                )
+        else:
+            reply_text = _friendly_display_error(result.message)
+        await update.effective_message.reply_text(reply_text)
 
 
 def _friendly_display_error(message: str) -> str:
@@ -628,6 +672,8 @@ async def _advance_once_to_next_target(
             services.database,
             target,
             mark_new_image=mark_new_image,
+            verification_state=result.verification_state or "verified",
+            verification_detail=result.verification_detail,
         )
     else:
         if mark_new_image:
@@ -675,7 +721,9 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
             total = services.database.count_displayed_images(active_orientation)
             position = services.database.get_displayed_image_position(target.image_id, active_orientation)
             if result.success:
-                await message.reply_text(f"Bild {position} von {total}: {target.image_id}")
+                await message.reply_text(
+                    _format_success_reply(f"Bild {position} von {total}: {target.image_id}", result)
+                )
             else:
                 await message.reply_text(_friendly_display_error(result.message))
             if result.success:
@@ -713,7 +761,9 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
         total = services.database.count_displayed_images(active_orientation)
         position = services.database.get_displayed_image_position(target.image_id, active_orientation)
         if result.success:
-            await message.reply_text(f"Bild {position} von {total}: {target.image_id}")
+            await message.reply_text(
+                _format_success_reply(f"Bild {position} von {total}: {target.image_id}", result)
+            )
             from app.slideshow import reschedule_slideshow_job
             reschedule_slideshow_job(context.application)
         else:
@@ -738,8 +788,12 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
             services.database,
             target,
             mark_new_image=False,
+            verification_state=result.verification_state or "verified",
+            verification_detail=result.verification_detail,
         )
-        await message.reply_text(f"Bild {position} von {total}: {target.image_id}")
+        await message.reply_text(
+            _format_success_reply(f"Bild {position} von {total}: {target.image_id}", result)
+        )
         from app.slideshow import reschedule_slideshow_job
         reschedule_slideshow_job(context.application)
     else:
@@ -958,13 +1012,18 @@ async def _delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT
                     services.database,
                     replacement,
                     mark_new_image=False,
+                    verification_state=result.verification_state or "verified",
+                    verification_detail=result.verification_detail,
                 )
                 services.database.delete_image(image_id)
                 for file_path_str in (record.local_original_path, record.local_rendered_path):
                     safe_unlink(file_path_str, logger=logger)
                 await _edit_query_message(
                     query,
-                    f"Bild gelöscht. Zeige jetzt {_image_label(replacement)} ({total} Bilder verbleibend).",
+                    _format_success_reply(
+                        f"Bild gelöscht. Zeige jetzt {_image_label(replacement)} ({total} Bilder verbleibend).",
+                        result,
+                    ),
                 )
                 from app.slideshow import reschedule_slideshow_job
                 reschedule_slideshow_job(context.application)

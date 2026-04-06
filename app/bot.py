@@ -151,7 +151,6 @@ async def _post_init(application: Application) -> None:
         current_image_id,
         transition_keys=DISPLAY_TRANSITION_KEYS,
     )
-    await _maybe_advance_after_boot(application, current_image_id)
     schedule_slideshow_job(application)
     application.bot_data[UPLOAD_WORKER_TASK_KEY] = asyncio.create_task(
         _upload_worker(application),

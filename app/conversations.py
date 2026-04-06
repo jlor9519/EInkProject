@@ -28,7 +28,11 @@ from app.display_state import (
     commit_display_success,
 )
 from app.fs_utils import safe_unlink
-from app.models import DisplayRequest, ImageRecord
+from app.models import (
+    DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY,
+    DisplayRequest,
+    ImageRecord,
+)
 from app.orientation import format_orientation_label, orientation_matches
 from app.time_utils import local_today_iso
 
@@ -78,6 +82,10 @@ def _caption_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Abbrechen", callback_data="photo_cancel"),
         ],
     ])
+
+
+def _display_verification_warning(detail: str | None = None) -> str:
+    return detail or "Anzeige wurde vermutlich aktualisiert, konnte aber nicht vollständig verifiziert werden."
 
 
 def _caption_prompt(pending: dict[str, Any]) -> str:
@@ -594,10 +602,17 @@ async def process_queued_upload(application: Application, image_id: str) -> None
             )
             warnings.extend(display_warnings)
             if record.status not in ("failed", "display_failed"):
+                verification_state = "verified"
+                verification_detail = None
+                if record.status == "displayed_with_warnings" and record.last_error:
+                    verification_state = DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY
+                    verification_detail = record.last_error
                 commit_display_success(
                     services.database,
                     record,
                     mark_new_image=True,
+                    verification_state=verification_state,
+                    verification_detail=verification_detail,
                 )
                 display_state_committed = True
                 from app.slideshow import reschedule_slideshow_job
@@ -689,6 +704,9 @@ async def _display_rendered_image(
         return record, warnings
 
     services.storage.cleanup_rendered_cache()
+
+    if display_result.verification_state == DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY:
+        warnings.append(_display_verification_warning(display_result.verification_detail))
 
     record.status = "displayed_with_warnings" if warnings else "displayed"
     record.last_error = " | ".join(warnings) if warnings else None

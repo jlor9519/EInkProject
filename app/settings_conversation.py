@@ -12,6 +12,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Con
 from app.auth import require_admin
 from app.commands import _delete_query_message, _display_target, _edit_query_message, get_display_lock, get_services
 from app.display_state import DISPLAY_TRANSITION_KEYS, begin_display_transition, clear_display_transition, commit_display_success
+from app.models import DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY
 from app.orientation import format_orientation_label, normalize_orientation_value
 
 WAITING_FOR_SETTINGS_CHOICE, WAITING_FOR_SETTINGS_VALUE = range(10, 12)
@@ -536,12 +537,18 @@ async def _switch_orientation_library(context: ContextTypes.DEFAULT_TYPE, orient
             return False, f"Passendes Bild konnte nicht angezeigt werden: {result.message}"
 
         if was_rendered:
-            target.status = "displayed"
-            target.last_error = None
+            if result.verification_state == DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY:
+                target.status = "displayed_with_warnings"
+                target.last_error = result.verification_detail
+            else:
+                target.status = "displayed"
+                target.last_error = None
         commit_display_success(
             services.database,
             target,
             mark_new_image=was_rendered,
+            verification_state=result.verification_state or "verified",
+            verification_detail=result.verification_detail,
         )
 
         from app.slideshow import reschedule_slideshow_job

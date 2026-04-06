@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+DISPLAY_VERIFICATION_VERIFIED = "verified"
+DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY = "assumed_after_recovery"
+DISPLAY_VERIFICATION_FAILED = "failed"
+
 
 @dataclass(slots=True)
 class TelegramConfig:
@@ -60,6 +64,8 @@ class InkyPiConfig:
     update_method: str
     update_now_url: str
     refresh_command: str
+    update_now_timeout_seconds: int = 120
+    refresh_command_timeout_seconds: int = 150
 
 
 @dataclass(slots=True)
@@ -137,6 +143,14 @@ class DisplayResult:
     success: bool
     message: str
     payload_path: Path | None = None
+    verification_state: str | None = None
+    verification_detail: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.verification_state is None:
+            self.verification_state = (
+                DISPLAY_VERIFICATION_VERIFIED if self.success else DISPLAY_VERIFICATION_FAILED
+            )
 
 
 @dataclass(slots=True)

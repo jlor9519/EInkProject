@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 from app.config import LEGACY_RESTART_REFRESH_COMMAND
 from app.inkypi_paths import resolve_inkypi_layout
 from app.models import (
+    DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY,
+    DISPLAY_VERIFICATION_VERIFIED,
     DeviceSettingsApplyResult,
     DisplayConfig,
     DisplayRequest,
@@ -154,10 +156,25 @@ class InkyPiAdapter:
         return {
             "degraded": True,
             "message": (
-                "InkyPi-HTTP gestört, Befehl-Fallback aktiv "
+                "InkyPi-HTTP langsam oder gestört, Wiederherstellungsmodus aktiv "
                 f"(noch ca. {self._format_duration_brief(remaining)}): {self._http_degraded_reason}"
             ),
         }
+
+    @staticmethod
+    def _assumed_after_recovery_detail() -> str:
+        return (
+            "Anzeige wurde nach einer InkyPi-Wiederherstellung als aktuell übernommen, "
+            "konnte aber nicht vollständig verifiziert werden."
+        )
+
+    def _assumed_after_recovery_result(self, message: str) -> DisplayResult:
+        return DisplayResult(
+            True,
+            message,
+            verification_state=DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY,
+            verification_detail=self._assumed_after_recovery_detail(),
+        )
 
     def apply_device_settings(
         self,
@@ -293,6 +310,20 @@ class InkyPiAdapter:
                 reloaded=True,
             )
 
+        if refresh_result.verification_state == DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY:
+            return DeviceSettingsApplyResult(
+                success=True,
+                message=(
+                    "Einstellungen wurden gespeichert, InkyPi wurde neu geladen und die Anzeige "
+                    "wahrscheinlich aktualisiert, konnte aber nicht vollständig verifiziert werden."
+                ),
+                confirmed_settings=confirmed,
+                device_config_path=device_config_path,
+                saved=True,
+                reloaded=True,
+                refreshed=True,
+            )
+
         return DeviceSettingsApplyResult(
             success=True,
             message="Einstellungen wurden gespeichert, InkyPi wurde neu geladen und die Anzeige aktualisiert.",
@@ -372,17 +403,16 @@ class InkyPiAdapter:
                                     f"{verify_result.message}"
                                 ),
                             )
-                        self._restore_primary_plugin_payload_if_needed(
-                            payload_path,
-                            primary_plugin_payload_path,
+                        logger.warning(
+                            "Recovery command succeeded while HTTP backend was degraded, but follow-up verification did not complete: %s",
+                            verify_result.message,
                         )
-                        return DisplayResult(
-                            False,
+                        return self._assumed_after_recovery_result(
                             (
                                 "InkyPi HTTP backend ist derzeit gestört "
                                 f"({self._http_degraded_reason}); recovery command succeeded, "
                                 f"but verified refresh failed: {verify_result.message}"
-                            ),
+                            )
                         )
                     logger.info("Display refresh succeeded via command fallback while HTTP backend was degraded")
                     return DisplayResult(
@@ -427,21 +457,16 @@ class InkyPiAdapter:
                                     f"and verified refresh completed: {verify_result.message}"
                                 ),
                             )
-                        self._restore_primary_plugin_payload_if_needed(
-                            payload_path,
-                            primary_plugin_payload_path,
-                        )
                         logger.warning(
-                            "Recovery command ran after HTTP failure, but verified refresh still failed: %s | %s",
+                            "Recovery command ran after HTTP failure, but follow-up verification did not complete: %s | %s",
                             http_result.message,
                             verify_result.message,
                         )
-                        return DisplayResult(
-                            False,
+                        return self._assumed_after_recovery_result(
                             (
                                 f"HTTP refresh failed: {http_result.message}; recovery command ran, "
                                 f"but verified refresh failed: {verify_result.message}"
-                            ),
+                            )
                         )
                     logger.warning(
                         "Display refresh recovered via command fallback after HTTP failure: %s",
@@ -502,23 +527,29 @@ class InkyPiAdapter:
         return result
 
     def _execute_refresh_command(self, command: list[str]) -> DisplayResult:
+        timeout_seconds = self.config.refresh_command_timeout_seconds
         try:
             completed = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=timeout_seconds,
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            logger.warning("Refresh command timed out after 60s")
-            return DisplayResult(False, "InkyPi refresh command timed out after 60 seconds")
+            logger.warning("Refresh command timed out after %ss", timeout_seconds)
+            return DisplayResult(False, f"InkyPi refresh command timed out after {timeout_seconds} seconds")
         if completed.returncode != 0:
             stderr = completed.stderr.strip() or completed.stdout.strip() or "unknown refresh error"
             return DisplayResult(False, f"InkyPi refresh failed: {stderr}")
-        return DisplayResult(True, completed.stdout.strip() or "refresh command completed successfully")
+        return DisplayResult(
+            True,
+            completed.stdout.strip() or "refresh command completed successfully",
+            verification_state=DISPLAY_VERIFICATION_VERIFIED,
+        )
 
     def _post_update_now(self, payload_path: Path) -> tuple[DisplayResult, bool]:
+        timeout_seconds = self.config.update_now_timeout_seconds
         form = parse.urlencode(
             {
                 "plugin_id": self.config.plugin_id,
@@ -533,7 +564,7 @@ class InkyPiAdapter:
         )
 
         try:
-            with request.urlopen(http_request, timeout=30) as response:
+            with request.urlopen(http_request, timeout=timeout_seconds) as response:
                 body = response.read().decode("utf-8", errors="replace")
                 return self._parse_http_response(body, response.status), False
         except error.HTTPError as exc:
@@ -543,7 +574,7 @@ class InkyPiAdapter:
                 return DisplayResult(False, f"InkyPi update_now returned HTTP {exc.code}"), False
             return parsed, False
         except (TimeoutError, socket.timeout):
-            return DisplayResult(False, "InkyPi update_now request timed out after 30 seconds"), True
+            return DisplayResult(False, f"InkyPi update_now request timed out after {timeout_seconds} seconds"), True
         except error.URLError as exc:
             return DisplayResult(False, f"InkyPi update_now request failed: {exc.reason}"), True
         except OSError as exc:

@@ -15,6 +15,7 @@ from app.display_state import (
     clear_display_transition,
     commit_display_success,
 )
+from app.models import DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY
 from app.time_utils import (
     is_in_local_time_window,
     local_now,
@@ -270,12 +271,18 @@ async def _try_display_next_rendered(context, services) -> bool:
     begin_display_transition(services.database, rendered.image_id, "slideshow")
     result = await _display_target(services, rendered)
     if result.success:
-        rendered.status = "displayed"
-        rendered.last_error = None
+        if result.verification_state == DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY:
+            rendered.status = "displayed_with_warnings"
+            rendered.last_error = result.verification_detail
+        else:
+            rendered.status = "displayed"
+            rendered.last_error = None
         commit_display_success(
             services.database,
             rendered,
             mark_new_image=True,
+            verification_state=result.verification_state or "verified",
+            verification_detail=result.verification_detail,
         )
         logger.info("Displayed rendered image %s from cooldown queue", rendered.image_id)
 
@@ -398,6 +405,8 @@ async def _advance_slideshow(context) -> None:
                 services.database,
                 target,
                 mark_new_image=False,
+                verification_state=result.verification_state or "verified",
+                verification_detail=result.verification_detail,
             )
             _reschedule_for(context.application, compute_next_fire_decision(services, active_orientation))
             logger.info("Auto-advanced to image %s", target.image_id)

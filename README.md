@@ -137,5 +137,6 @@ That runner uses isolated state under `telegram-bot-test/`, mocks display refres
 - The default render size is `800x480`.
 - The default InkyPi source checkout path is `~/InkyPi`, and the default runtime install path is `/usr/local/inkypi`.
 - `inkypi.refresh_command` is used as the primary trigger in `command` mode and as the automatic recovery fallback when `http_update_now` is configured but the local HTTP refresh path is unhealthy.
-- The default fallback `sudo systemctl restart inkypi.service` is treated as a recovery action in `http_update_now` mode. The app only reports a successful display after InkyPi becomes reachable again and accepts a verified refresh for the target payload.
+- `inkypi.update_now_timeout_seconds` and `inkypi.refresh_command_timeout_seconds` can be increased for slow e-paper panels such as the Waveshare `epd7in3e`.
+- The default fallback `sudo systemctl restart inkypi.service` is treated as a recovery action in `http_update_now` mode. If the panel likely updated during recovery but HTTP verification stays too slow, the app keeps the new image as current and marks it as unverified in `/status` and `/list`.
 - Exact InkyPi refresh behavior is intentionally configurable because the validated local command may differ between installations.
