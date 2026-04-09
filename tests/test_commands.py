@@ -79,6 +79,38 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Second", reply)
             self.assertIn("▶", reply)  # current image marker
 
+    async def test_delete_command_uses_upload_timestamp_for_images_without_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.database.set_setting("current_image_id", "img-1")
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-1.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                )
+            )
+
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await delete_command(update, context)
+
+            reply = update.effective_message.replies[0]
+            self.assertIn(_expected_upload_label("2026-03-18T12:00:00+00:00"), reply)
+            self.assertNotIn("(kein Text)", reply)
+            self.assertIn("▶", reply)
+
     async def test_delete_confirm_blocks_last_image(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -182,6 +214,102 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
                 update.callback_query.text_edits,
                 ["Aktuelles Bild konnte nicht ersetzt werden. Anzeige fehlgeschlagen: Bilddatei für img-2 nicht mehr vorhanden."],
             )
+
+    async def test_list_command_uses_upload_timestamp_for_images_without_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.database.set_setting("current_image_id", "img-1")
+            services.database.set_setting("slideshow_next_fire_at", "2099-01-01T00:00:00+00:00")
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-1.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                )
+            )
+
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await list_command(update, context)
+
+            reply = update.effective_message.replies[0]
+            self.assertIn(_expected_upload_label("2026-03-18T12:00:00+00:00"), reply)
+            self.assertNotIn("(kein Text)", reply)
+
+    async def test_list_command_prefers_caption_over_upload_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.database.set_setting("current_image_id", "img-1")
+            services.database.set_setting("slideshow_next_fire_at", "2099-01-01T00:00:00+00:00")
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-1.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="Current",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                )
+            )
+
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await list_command(update, context)
+
+            reply = update.effective_message.replies[0]
+            self.assertIn('"Current"', reply)
+            self.assertNotIn("Hochgeladen:", reply)
+
+    async def test_list_command_falls_back_to_raw_created_at_when_timestamp_is_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.database.set_setting("current_image_id", "img-1")
+            services.database.set_setting("slideshow_next_fire_at", "2099-01-01T00:00:00+00:00")
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=111,
+                    local_original_path=str(tmpdir_path / "incoming" / "img-1.jpg"),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="bad-timestamp",
+                    status="displayed",
+                    last_error=None,
+                )
+            )
+
+            update = _MessageUpdate()
+            context = _FakeContext(services)
+
+            await list_command(update, context)
+
+            reply = update.effective_message.replies[0]
+            self.assertIn("Hochgeladen: bad-timestamp", reply)
+            self.assertNotIn("(kein Text)", reply)
 
     async def test_status_and_list_use_active_orientation_library(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1356,6 +1484,13 @@ class _FakeBot:
 
     async def delete_message(self, chat_id=None, message_id=None) -> None:
         self.deleted_messages.append((chat_id, message_id))
+
+
+def _expected_upload_label(created_at: str) -> str:
+    parsed = datetime.fromisoformat(created_at)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return f"Hochgeladen: {parsed.astimezone().strftime('%d.%m.%Y %H:%M')}"
 
 
 def _build_services(base_dir: Path, *, is_admin: bool = False):

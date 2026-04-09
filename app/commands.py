@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -488,7 +489,22 @@ def _image_label(record: ImageRecord) -> str:
         parts.append(record.location)
     if record.taken_at:
         parts.append(record.taken_at)
-    return " • ".join(parts) if parts else "(kein Text)"
+    if parts:
+        return " • ".join(parts)
+    return _upload_timestamp_label(record)
+
+
+def _upload_timestamp_label(record: ImageRecord) -> str:
+    if record.created_at:
+        try:
+            created_at = datetime.fromisoformat(record.created_at)
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            local_created_at = created_at.astimezone()
+            return f"Hochgeladen: {local_created_at.strftime('%d.%m.%Y %H:%M')}"
+        except (TypeError, ValueError):
+            return f"Hochgeladen: {record.created_at}"
+    return f"Bild {record.image_id}"
 
 
 def _format_timer_mode_label(mode: str | None, detail: str | None, interval_seconds: int) -> str:
