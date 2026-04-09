@@ -150,7 +150,7 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
             await list_command(update, command_context)
             self.assertIn('"img-3"', update.effective_message.replies[0])
 
-    async def test_auto_advance_stays_in_display_error_when_restart_recovery_cannot_verify_refresh(self) -> None:
+    async def test_auto_advance_marks_unverified_success_when_restart_recovery_cannot_verify_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             services = _build_services_with_real_adapter(
@@ -175,13 +175,14 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
                 await _advance_slideshow(context)
 
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-1")
-            self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
+            self.assertEqual(payload["image_id"], "img-2")
+            self.assertNotEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
 
             update = _MessageUpdate()
             command_context = _CommandContext(services)
             await list_command(update, command_context)
-            self.assertIn('"img-1"', update.effective_message.replies[0])
+            self.assertIn('"img-2"', update.effective_message.replies[0])
+            self.assertIn("[unverifiziert]", update.effective_message.replies[0])
 
     async def test_auto_advance_ignores_images_hidden_by_rotation_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

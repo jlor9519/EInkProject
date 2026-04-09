@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 
@@ -18,7 +17,7 @@ from app.display_state import (
     begin_display_transition,
     clear_display_transition,
     commit_display_success,
-    read_current_payload_image_id,
+    read_current_image_id,
 )
 from app.fs_utils import safe_unlink
 from app.models import (
@@ -266,16 +265,7 @@ async def _render_status_text(services: AppServices) -> str:
 
 async def _render_list_text(services: AppServices) -> str:
     active_orientation = get_active_orientation(services)
-    payload_path = services.config.storage.current_payload_path
-    if not payload_path.exists():
-        return "Noch kein Bild vorhanden."
-
-    try:
-        payload = json.loads(payload_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return "Payload-Datei konnte nicht gelesen werden."
-
-    current_image_id = payload.get("image_id")
+    current_image_id = _get_current_image_id(services)
     if not current_image_id:
         return "Kein aktuelles Bild erkannt."
 
@@ -731,18 +721,7 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
                 reschedule_slideshow_job(context.application)
             return
 
-    payload_path = services.config.storage.current_payload_path
-    if not payload_path.exists():
-        await message.reply_text("Noch kein Bild vorhanden.")
-        return
-
-    try:
-        payload = json.loads(payload_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        await message.reply_text("Aktuelle Payload-Datei konnte nicht gelesen werden.")
-        return
-
-    current_image_id = payload.get("image_id")
+    current_image_id = _get_current_image_id(services)
     if not current_image_id:
         await message.reply_text("Kein aktuelles Bild erkannt.")
         return
@@ -815,7 +794,7 @@ _DELETE_PAGE_SIZE = 10
 
 
 def _get_current_image_id(services: AppServices) -> str | None:
-    return read_current_payload_image_id(services.config.storage.current_payload_path)
+    return read_current_image_id(services.database, services.config.storage.current_payload_path)
 
 
 def _build_delete_page(

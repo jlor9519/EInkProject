@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -14,6 +13,7 @@ from app.display_state import (
     begin_display_transition,
     clear_display_transition,
     commit_display_success,
+    read_current_image_id,
 )
 from app.models import DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY
 from app.time_utils import (
@@ -361,25 +361,10 @@ async def _advance_slideshow(context) -> None:
             return
 
         # Normal rotation
-        payload_path = services.config.storage.current_payload_path
-        if not payload_path.exists():
-            _reschedule_for(
-                context.application,
-                NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="payload_missing"),
-            )
-            return
-
-        try:
-            payload = json.loads(payload_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            logger.warning("Auto-advance: could not read payload")
-            _reschedule_for(
-                context.application,
-                NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="payload_missing"),
-            )
-            return
-
-        current_image_id = payload.get("image_id")
+        current_image_id = read_current_image_id(
+            services.database,
+            services.config.storage.current_payload_path,
+        )
         if not current_image_id:
             _reschedule_for(
                 context.application,

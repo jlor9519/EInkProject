@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.database import Database
-from app.display_state import DISPLAY_TRANSITION_KEYS
+from app.display_state import DISPLAY_TRANSITION_KEYS, commit_display_success
 from app.models import ImageRecord
 
 
@@ -285,8 +285,84 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(database.get_image_by_id("img-other").status, "queued")
             self.assertEqual([record.image_id for record in pending], ["img-other"])
             self.assertIsNotNone(database.get_setting("current_image_displayed_at"))
+            self.assertEqual(database.get_setting("current_image_id"), "img-current")
             for key in DISPLAY_TRANSITION_KEYS:
                 self.assertIsNone(database.get_setting(key))
+
+    def test_commit_display_success_inserts_new_image_at_front_of_rotation_ring(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+            current = ImageRecord(
+                image_id="img-c",
+                telegram_file_id="file-c",
+                telegram_chat_id=111,
+                local_original_path="/tmp/c.jpg",
+                local_rendered_path="/tmp/c.png",
+                location="",
+                taken_at="",
+                caption="",
+                uploaded_by=111,
+                created_at="2026-03-18T12:00:00+00:00",
+                status="displayed",
+                last_error=None,
+                orientation_bucket="shared",
+            )
+            next_record = ImageRecord(
+                image_id="img-b",
+                telegram_file_id="file-b",
+                telegram_chat_id=111,
+                local_original_path="/tmp/b.jpg",
+                local_rendered_path="/tmp/b.png",
+                location="",
+                taken_at="",
+                caption="",
+                uploaded_by=111,
+                created_at="2026-03-18T12:05:00+00:00",
+                status="displayed",
+                last_error=None,
+                orientation_bucket="shared",
+            )
+            third = ImageRecord(
+                image_id="img-a",
+                telegram_file_id="file-a",
+                telegram_chat_id=111,
+                local_original_path="/tmp/a.jpg",
+                local_rendered_path="/tmp/a.png",
+                location="",
+                taken_at="",
+                caption="",
+                uploaded_by=111,
+                created_at="2026-03-18T12:10:00+00:00",
+                status="displayed",
+                last_error=None,
+                orientation_bucket="shared",
+            )
+            for record in (current, next_record, third):
+                database.upsert_image(record)
+            database.set_setting("current_image_id", "img-c")
+
+            uploaded = ImageRecord(
+                image_id="img-d",
+                telegram_file_id="file-d",
+                telegram_chat_id=111,
+                local_original_path="/tmp/d.jpg",
+                local_rendered_path="/tmp/d.png",
+                location="",
+                taken_at="",
+                caption="",
+                uploaded_by=111,
+                created_at="2026-03-18T12:15:00+00:00",
+                status="displayed",
+                last_error=None,
+                orientation_bucket="shared",
+            )
+
+            commit_display_success(database, uploaded, mark_new_image=True)
+
+            self.assertEqual(database.get_setting("current_image_id"), "img-d")
+            ordered = database.get_all_displayed_images_ordered("img-d")
+            self.assertEqual([record.image_id for record in ordered], ["img-d", "img-b", "img-a", "img-c"])
 
     def test_maintenance_job_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
