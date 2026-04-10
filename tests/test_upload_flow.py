@@ -399,7 +399,7 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["image_id"], "img-1")
             self.assertTrue(services.display.backend_diagnostics()["degraded"])
 
-    async def test_process_queued_upload_marks_unverified_display_when_restart_recovery_cannot_verify_refresh(self) -> None:
+    async def test_process_queued_upload_does_not_mark_displayed_when_restart_recovery_cannot_verify_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             services = _build_services_with_real_adapter(
@@ -443,9 +443,9 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
                 await process_queued_upload(application, "img-1")
 
             record = services.database.get_image_by_id("img-1")
-            self.assertEqual(record.status, "displayed_with_warnings")
-            self.assertIn("nicht vollständig verifiziert", application.bot.messages[0][1])
-            self.assertTrue(services.config.storage.current_payload_path.exists())
+            self.assertEqual(record.status, "display_failed")
+            self.assertIn("Anzeige konnte nicht aktualisiert werden", application.bot.messages[0][1])
+            self.assertFalse(services.config.storage.current_payload_path.exists())
 
 
 class _FakeAuth:

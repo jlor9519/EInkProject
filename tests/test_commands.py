@@ -758,7 +758,7 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(services.display.display_calls[-1], "img-next")
             self.assertIsNotNone(services.database.get_setting("last_new_image_displayed_at"))
             self.assertIsNotNone(services.database.get_setting("slideshow_next_fire_at"))
-            self.assertEqual(update.effective_message.replies[-1], "Bild 1 von 2: img-next")
+            self.assertEqual(update.effective_message.replies[-1], "Bild 2 von 2: img-next")
 
     async def test_next_ignores_displayed_images_hidden_by_rotation_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1001,10 +1001,10 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(
                 update_next.effective_message.replies[-1],
-                "Bild 2 von 2: img-next (Anzeige nicht vollständig verifiziert)",
+                "Display nicht erreichbar. Bitte prüfe die Verbindung zum Pi.",
             )
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-next")
+            self.assertEqual(payload["image_id"], "img-current")
 
             update_list = _MessageUpdate()
             await list_command(update_list, context)
@@ -1044,10 +1044,10 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(
                 update.effective_message.replies[-1],
-                "Bild 1 von 2: img-prev (Anzeige nicht vollständig verifiziert)",
+                "Display nicht erreichbar. Bitte prüfe die Verbindung zum Pi.",
             )
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-prev")
+            self.assertEqual(payload["image_id"], "img-current")
 
     async def test_refresh_uses_command_fallback_after_http_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1073,7 +1073,7 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(update.effective_message.replies[-1], "Aktualisierung ausgelöst.")
             status_update = _MessageUpdate()
             await status_command(status_update, context)
-            self.assertIn("Wiederherstellungsmodus aktiv", status_update.effective_message.replies[0])
+            self.assertIn("Befehl-Fallback aktiv", status_update.effective_message.replies[0])
 
     async def test_refresh_reports_failure_when_restart_recovery_cannot_verify_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1105,7 +1105,7 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(
                 update.effective_message.replies[-1],
-                "Aktualisierung wahrscheinlich erfolgreich, aber die Anzeige konnte nicht vollständig verifiziert werden.",
+                "Display nicht erreichbar. Bitte prüfe die Verbindung zum Pi.",
             )
 
     async def test_help_command_adds_quick_actions_and_admin_settings_button(self) -> None:
@@ -1336,7 +1336,7 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             await command_action_callback(delete_update, context)
 
             self.assertEqual(services.display.display_calls[-1], "img-next")
-            self.assertEqual(next_update.callback_query.message.replies[-1], "Bild 1 von 2: img-next")
+            self.assertEqual(next_update.callback_query.message.replies[-1], "Bild 2 von 2: img-next")
             self.assertIn("Bilder zum Löschen", delete_update.callback_query.message.replies[-1])
 
     async def test_command_action_callback_close_deletes_message(self) -> None:

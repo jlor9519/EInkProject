@@ -65,8 +65,7 @@ class Database:
                     created_at TEXT NOT NULL,
                     status TEXT NOT NULL,
                     last_error TEXT,
-                    orientation_bucket TEXT NOT NULL DEFAULT 'shared',
-                    rotation_rank INTEGER
+                    orientation_bucket TEXT NOT NULL DEFAULT 'shared'
                 );
 
                 CREATE TABLE IF NOT EXISTS settings (
@@ -114,10 +113,6 @@ class Database:
                 self._connection.execute(
                     "ALTER TABLE images ADD COLUMN orientation_bucket TEXT NOT NULL DEFAULT 'shared'"
                 )
-            if "rotation_rank" not in columns:
-                self._connection.execute(
-                    "ALTER TABLE images ADD COLUMN rotation_rank INTEGER"
-                )
             self._connection.execute(
                 "UPDATE images SET orientation_bucket = ? WHERE orientation_bucket IS NULL OR orientation_bucket = ''",
                 (ORIENTATION_SHARED,),
@@ -125,10 +120,6 @@ class Database:
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_images_orientation ON images(orientation_bucket)"
             )
-            self._connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_images_rotation_rank ON images(rotation_rank)"
-            )
-            self._backfill_missing_rotation_ranks_locked()
             self._connection.execute(
                 """
                 INSERT INTO settings(key, value) VALUES(?, ?)
@@ -267,26 +258,6 @@ class Database:
         with self._lock:
             if record is not None:
                 self._upsert_image_locked(record)
-            if settings:
-                self._set_settings_locked(settings)
-            if clear_keys:
-                self._connection.executemany(
-                    "DELETE FROM settings WHERE key = ?",
-                    ((key,) for key in clear_keys),
-                )
-            self._connection.commit()
-
-    def commit_new_display(
-        self,
-        record: ImageRecord,
-        *,
-        previous_current_image_id: str | None,
-        settings: dict[str, str | None] | None = None,
-        clear_keys: tuple[str, ...] = (),
-    ) -> None:
-        with self._lock:
-            self._upsert_image_locked(record)
-            self._insert_displayed_image_at_front_locked(record.image_id, previous_current_image_id)
             if settings:
                 self._set_settings_locked(settings)
             if clear_keys:
@@ -524,7 +495,11 @@ class Database:
 
     def get_adjacent_image(self, current_image_id: str, direction: str, active_orientation: str | None = None) -> ImageRecord | None:
         with self._lock:
-            pool_rows = self._get_displayed_rotation_rows_locked(active_orientation)
+            pool_rows = [
+                row
+                for row in self._get_rotation_pool_rows_locked(active_orientation)
+                if row["status"] in self._DISPLAYED_STATUSES
+            ]
             row = self._select_relative_row_locked(
                 current_image_id,
                 pool_rows,
@@ -540,13 +515,11 @@ class Database:
             pool_rows = self._get_rotation_pool_rows_locked(active_orientation)
             row = next((row for row in pool_rows if row["status"] == "rendered"), None)
             if row is None:
-                displayed_rows = self._sort_displayed_rows_locked(
-                    [
-                        candidate
-                        for candidate in pool_rows
-                        if candidate["status"] in self._DISPLAYED_STATUSES
-                    ]
-                )
+                displayed_rows = [
+                    candidate
+                    for candidate in pool_rows
+                    if candidate["status"] in self._DISPLAYED_STATUSES
+                ]
                 row = self._select_relative_row_locked(
                     current_image_id,
                     displayed_rows,
@@ -566,7 +539,11 @@ class Database:
 
     def get_displayed_image_position(self, image_id: str, active_orientation: str | None = None) -> int:
         with self._lock:
-            displayed_rows = self._get_displayed_rotation_rows_locked(active_orientation)
+            displayed_rows = [
+                row
+                for row in self._get_rotation_pool_rows_locked(active_orientation)
+                if row["status"] in self._DISPLAYED_STATUSES
+            ]
             for index, row in enumerate(displayed_rows, start=1):
                 if row["image_id"] == image_id:
                     return index
@@ -587,7 +564,6 @@ class Database:
             status=row["status"],
             last_error=row["last_error"],
             orientation_bucket=row["orientation_bucket"] or ORIENTATION_SHARED,
-            rotation_rank=row["rotation_rank"],
         )
 
     def _row_to_maintenance_job(self, row: sqlite3.Row) -> MaintenanceJobRecord:
@@ -687,7 +663,6 @@ class Database:
     ) -> list[ImageRecord]:
         promoted_to_displayed = False
         with self._lock:
-            previous_current_image_id = self._get_setting_locked("current_image_id")
             if current_image_id:
                 current_row = self._connection.execute(
                     "SELECT * FROM images WHERE image_id = ?",
@@ -707,14 +682,12 @@ class Database:
                             (promoted_status, current_image_id),
                         )
                         promoted_to_displayed = True
-                        self._insert_displayed_image_at_front_locked(current_image_id, previous_current_image_id)
                     displayed_at = self._connection.execute(
                         "SELECT value FROM settings WHERE key = ?",
                         ("current_image_displayed_at",),
                     ).fetchone()
                     if displayed_at is None:
                         self._set_settings_locked({"current_image_displayed_at": utcnow_iso()})
-                    self._set_settings_locked({"current_image_id": current_image_id})
 
             if current_image_id:
                 self._connection.execute(
@@ -781,7 +754,16 @@ class Database:
     def get_next_images(self, current_image_id: str, n: int, active_orientation: str | None = None) -> list[ImageRecord]:
         """Get the next N displayed images after current_image_id, wrapping around."""
         with self._lock:
-            displayed_rows = self._get_displayed_rotation_rows_locked(active_orientation)
+            current = self._connection.execute(
+                "SELECT created_at FROM images WHERE image_id = ?", (current_image_id,)
+            ).fetchone()
+            if current is None:
+                return []
+            displayed_rows = [
+                row
+                for row in self._get_rotation_pool_rows_locked(active_orientation)
+                if row["status"] in self._DISPLAYED_STATUSES
+            ]
             if not displayed_rows:
                 return []
 
@@ -797,6 +779,7 @@ class Database:
                 start_index = self._get_rotation_start_index_locked(
                     displayed_rows,
                     current_image_id,
+                    current["created_at"],
                     include_current=False,
                 )
                 if start_index is None:
@@ -807,17 +790,27 @@ class Database:
     def get_all_displayed_images_ordered(self, current_image_id: str, active_orientation: str | None = None) -> list[ImageRecord]:
         """Return all displayed images in slideshow order, starting from current_image_id.
 
-        The current image is first, then subsequent images in explicit ring order,
+        The current image is first, then subsequent images in created_at order,
         wrapping around to the oldest.
         """
         with self._lock:
-            displayed_rows = self._get_displayed_rotation_rows_locked(active_orientation)
+            current = self._connection.execute(
+                "SELECT created_at FROM images WHERE image_id = ?", (current_image_id,)
+            ).fetchone()
+            if current is None:
+                return []
+            displayed_rows = [
+                row
+                for row in self._get_rotation_pool_rows_locked(active_orientation)
+                if row["status"] in self._DISPLAYED_STATUSES
+            ]
             if not displayed_rows:
                 return []
 
             start_index = self._get_rotation_start_index_locked(
                 displayed_rows,
                 current_image_id,
+                current["created_at"],
                 include_current=True,
             )
             if start_index is None:
@@ -998,24 +991,6 @@ class Database:
             ).fetchall()
         return list(reversed(rows))
 
-    def _get_displayed_rotation_rows_locked(self, active_orientation: str | None) -> list[sqlite3.Row]:
-        return self._sort_displayed_rows_locked(
-            [
-                row
-                for row in self._get_rotation_pool_rows_locked(active_orientation)
-                if row["status"] in self._DISPLAYED_STATUSES
-            ]
-        )
-
-    @staticmethod
-    def _display_order_key(row: sqlite3.Row) -> tuple[bool, int, str, str]:
-        rank = row["rotation_rank"]
-        normalized_rank = int(rank) if rank is not None else 0
-        return (rank is None, normalized_rank, str(row["created_at"]), str(row["image_id"]))
-
-    def _sort_displayed_rows_locked(self, rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
-        return sorted(rows, key=self._display_order_key)
-
     def _select_relative_row_locked(
         self,
         current_image_id: str,
@@ -1024,13 +999,13 @@ class Database:
         direction: str,
     ) -> sqlite3.Row | None:
         current = self._connection.execute(
-            "SELECT image_id, created_at, rotation_rank FROM images WHERE image_id = ?",
+            "SELECT created_at FROM images WHERE image_id = ?",
             (current_image_id,),
         ).fetchone()
         if current is None or not rows:
             return None
 
-        current_key = self._display_order_key(current)
+        current_created_at = current["created_at"]
         current_index = next(
             (index for index, row in enumerate(rows) if row["image_id"] == current_image_id),
             None,
@@ -1044,30 +1019,23 @@ class Database:
 
         if direction == "next":
             for row in rows:
-                if self._display_order_key(row) > current_key:
+                if row["created_at"] > current_created_at:
                     return row
             return rows[0]
 
         for row in reversed(rows):
-            if self._display_order_key(row) < current_key:
+            if row["created_at"] < current_created_at:
                 return row
         return rows[-1]
 
+    @staticmethod
     def _get_rotation_start_index_locked(
-        self,
         rows: list[sqlite3.Row],
         current_image_id: str,
+        current_created_at: str,
         *,
         include_current: bool,
     ) -> int | None:
-        current = self._connection.execute(
-            "SELECT image_id, created_at, rotation_rank FROM images WHERE image_id = ?",
-            (current_image_id,),
-        ).fetchone()
-        if current is None or not rows:
-            return None
-
-        current_key = self._display_order_key(current)
         current_index = next(
             (index for index, row in enumerate(rows) if row["image_id"] == current_image_id),
             None,
@@ -1080,69 +1048,9 @@ class Database:
             return (current_index + 1) % len(rows)
 
         for index, row in enumerate(rows):
-            if self._display_order_key(row) > current_key:
+            if row["created_at"] > current_created_at:
                 return index
         return 0
-
-    def _insert_displayed_image_at_front_locked(
-        self,
-        image_id: str,
-        previous_current_image_id: str | None,
-    ) -> None:
-        rows = self._sort_displayed_rows_locked(
-            self._connection.execute(
-                f"""
-                SELECT * FROM images
-                WHERE status IN ({", ".join("?" for _ in self._DISPLAYED_STATUSES)})
-                """,
-                self._DISPLAYED_STATUSES,
-            ).fetchall()
-        )
-        if not rows:
-            return
-
-        ordered_ids = [str(row["image_id"]) for row in rows if row["image_id"] != image_id]
-        if previous_current_image_id and previous_current_image_id in ordered_ids:
-            previous_index = ordered_ids.index(previous_current_image_id)
-            remaining = ordered_ids[previous_index + 1 :] + ordered_ids[:previous_index]
-            new_order = [image_id, *remaining, previous_current_image_id]
-        else:
-            new_order = [image_id, *ordered_ids]
-
-        self._connection.executemany(
-            "UPDATE images SET rotation_rank = ? WHERE image_id = ?",
-            ((rank, image_id_value) for rank, image_id_value in enumerate(new_order, start=1)),
-        )
-
-    def _backfill_missing_rotation_ranks_locked(self) -> None:
-        rows = self._connection.execute(
-            """
-            SELECT image_id
-            FROM images
-            WHERE rotation_rank IS NULL
-            ORDER BY created_at ASC, image_id ASC
-            """
-        ).fetchall()
-        if not rows:
-            return
-        max_row = self._connection.execute(
-            "SELECT COALESCE(MAX(rotation_rank), 0) AS max_rank FROM images"
-        ).fetchone()
-        next_rank = int(max_row["max_rank"] if max_row else 0) + 1
-        self._connection.executemany(
-            "UPDATE images SET rotation_rank = ? WHERE image_id = ?",
-            (
-                (next_rank + offset, str(candidate["image_id"]))
-                for offset, candidate in enumerate(rows)
-            ),
-        )
-
-    def _get_setting_locked(self, key: str) -> str | None:
-        row = self._connection.execute(
-            "SELECT value FROM settings WHERE key = ?",
-            (key,),
-        ).fetchone()
-        return str(row["value"]) if row else None
 
     def _upsert_image_locked(self, record: ImageRecord) -> None:
         self._connection.execute(
@@ -1160,9 +1068,8 @@ class Database:
                 created_at,
                 status,
                 last_error,
-                orientation_bucket,
-                rotation_rank
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                orientation_bucket
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(image_id) DO UPDATE SET
                 telegram_file_id = excluded.telegram_file_id,
                 telegram_chat_id = excluded.telegram_chat_id,
@@ -1175,8 +1082,7 @@ class Database:
                 created_at = excluded.created_at,
                 status = excluded.status,
                 last_error = excluded.last_error,
-                orientation_bucket = excluded.orientation_bucket,
-                rotation_rank = COALESCE(excluded.rotation_rank, images.rotation_rank)
+                orientation_bucket = excluded.orientation_bucket
             """,
             (
                 record.image_id,
@@ -1192,7 +1098,6 @@ class Database:
                 record.status,
                 record.last_error,
                 record.orientation_bucket,
-                record.rotation_rank,
             ),
         )
 

@@ -20,7 +20,6 @@ DISPLAY_TRANSITION_KEYS = (
     DISPLAY_TRANSITION_STARTED_AT_KEY,
     DISPLAY_TRANSITION_KIND_KEY,
 )
-CURRENT_IMAGE_ID_KEY = "current_image_id"
 CURRENT_IMAGE_VERIFICATION_STATE_KEY = "current_image_verification_state"
 CURRENT_IMAGE_VERIFICATION_DETAIL_KEY = "current_image_verification_detail"
 
@@ -35,13 +34,6 @@ def read_current_payload_image_id(payload_path: Path) -> str | None:
         return None
     image_id = payload.get("image_id")
     return str(image_id) if image_id else None
-
-
-def read_current_image_id(database, payload_path: Path) -> str | None:
-    stored = database.get_setting(CURRENT_IMAGE_ID_KEY)
-    if stored:
-        return stored
-    return read_current_payload_image_id(payload_path)
 
 
 def begin_display_transition(database, image_id: str, kind: str) -> None:
@@ -68,25 +60,16 @@ def commit_display_success(
     displayed_at: str | None = None,
 ) -> str:
     timestamp = displayed_at or utcnow_iso()
-    previous_current_image_id = database.get_setting(CURRENT_IMAGE_ID_KEY)
     settings: dict[str, str | None] = {
-        CURRENT_IMAGE_ID_KEY: record.image_id,
         "current_image_displayed_at": timestamp,
         CURRENT_IMAGE_VERIFICATION_STATE_KEY: verification_state,
         CURRENT_IMAGE_VERIFICATION_DETAIL_KEY: verification_detail,
     }
     if mark_new_image:
         settings["last_new_image_displayed_at"] = timestamp
-        database.commit_new_display(
-            record,
-            previous_current_image_id=previous_current_image_id,
-            settings=settings,
-            clear_keys=DISPLAY_TRANSITION_KEYS,
-        )
-    else:
-        database.apply_image_and_settings(
-            record,
-            settings=settings,
-            clear_keys=DISPLAY_TRANSITION_KEYS,
-        )
+    database.apply_image_and_settings(
+        record,
+        settings=settings,
+        clear_keys=DISPLAY_TRANSITION_KEYS,
+    )
     return timestamp
