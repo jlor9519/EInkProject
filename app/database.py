@@ -788,11 +788,7 @@ class Database:
             return [self._row_to_image(row) for row in ordered[:n]]
 
     def get_all_displayed_images_ordered(self, current_image_id: str, active_orientation: str | None = None) -> list[ImageRecord]:
-        """Return all displayed images in slideshow order, starting from current_image_id.
-
-        The current image is first, then subsequent images in created_at order,
-        wrapping around to the oldest.
-        """
+        """Return all displayed images in newest-first slideshow order, starting from current_image_id."""
         with self._lock:
             current = self._connection.execute(
                 "SELECT created_at FROM images WHERE image_id = ?", (current_image_id,)
@@ -824,7 +820,7 @@ class Database:
             row = next(
                 (
                     candidate
-                    for candidate in reversed(self._get_rotation_pool_rows_locked(active_orientation))
+                    for candidate in self._get_rotation_pool_rows_locked(active_orientation)
                     if candidate["status"] in ("rendered", *self._DISPLAYED_STATUSES)
                 ),
                 None,
@@ -989,7 +985,7 @@ class Database:
                 """,
                 (*self._ROTATION_ELIGIBLE_STATUSES, *orientation_args, limit),
             ).fetchall()
-        return list(reversed(rows))
+        return list(rows)
 
     def _select_relative_row_locked(
         self,
@@ -1019,12 +1015,12 @@ class Database:
 
         if direction == "next":
             for row in rows:
-                if row["created_at"] > current_created_at:
+                if row["created_at"] < current_created_at:
                     return row
             return rows[0]
 
         for row in reversed(rows):
-            if row["created_at"] < current_created_at:
+            if row["created_at"] > current_created_at:
                 return row
         return rows[-1]
 
@@ -1048,7 +1044,7 @@ class Database:
             return (current_index + 1) % len(rows)
 
         for index, row in enumerate(rows):
-            if row["created_at"] > current_created_at:
+            if row["created_at"] < current_created_at:
                 return index
         return 0
 

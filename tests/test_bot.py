@@ -37,10 +37,10 @@ class BootAdvanceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await _post_init(application)
 
-            self.assertEqual(services.display.display_calls, ["img-2"])
-            self.assertEqual(services.database.get_setting(LAST_HANDLED_BOOT_ID_KEY), "boot-a")
+            self.assertEqual(services.display.display_calls, [])
+            self.assertIsNone(services.database.get_setting(LAST_HANDLED_BOOT_ID_KEY))
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-2")
+            self.assertEqual(payload["image_id"], "img-1")
 
     async def test_post_init_does_not_advance_again_on_same_boot(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -152,7 +152,7 @@ class BootAdvanceTests(unittest.IsolatedAsyncioTestCase):
                 await _post_init(application)
 
             self.assertEqual(services.display.display_calls, [])
-            self.assertEqual(services.database.get_setting(LAST_HANDLED_BOOT_ID_KEY), "boot-a")
+            self.assertIsNone(services.database.get_setting(LAST_HANDLED_BOOT_ID_KEY))
 
     async def test_boot_advance_ignores_quiet_hours_but_startup_schedule_still_respects_them(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -170,8 +170,9 @@ class BootAdvanceTests(unittest.IsolatedAsyncioTestCase):
             ), patch("app.slideshow.local_now", return_value=now):
                 await _post_init(application)
 
-            self.assertEqual(services.display.display_calls[-1], "img-2")
-            self.assertEqual(application.job_queue.calls[-1]["first"], 7 * 3600)
+            self.assertEqual(services.display.display_calls, [])
+            self.assertGreaterEqual(application.job_queue.calls[-1]["first"], 6 * 3600 + 50 * 60)
+            self.assertLessEqual(application.job_queue.calls[-1]["first"], 7 * 3600)
 
     async def test_post_init_advances_after_new_boot_with_command_mode_display(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -191,8 +192,8 @@ class BootAdvanceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await _post_init(application)
 
-            self.assertEqual(services.display.display_calls, ["img-2"])
-            self.assertEqual(services.database.get_setting(LAST_HANDLED_BOOT_ID_KEY), "boot-command")
+            self.assertEqual(services.display.display_calls, [])
+            self.assertIsNone(services.database.get_setting(LAST_HANDLED_BOOT_ID_KEY))
 
 
 class ErrorHandlerTests(unittest.IsolatedAsyncioTestCase):

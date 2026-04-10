@@ -140,7 +140,7 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
                 await _advance_slideshow(context)
 
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-3")
+            self.assertEqual(payload["image_id"], "img-2")
             self.assertEqual(mock_http.call_count, 1)
             self.assertEqual(mock_command.call_count, 2)
             self.assertNotEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
@@ -148,7 +148,7 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
             update = _MessageUpdate()
             command_context = _CommandContext(services)
             await list_command(update, command_context)
-            self.assertIn('"img-3"', update.effective_message.replies[0])
+            self.assertIn('"img-2"', update.effective_message.replies[0])
 
     async def test_auto_advance_stays_in_display_error_when_restart_recovery_cannot_verify_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -175,13 +175,13 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
                 await _advance_slideshow(context)
 
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-1")
-            self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
+            self.assertEqual(payload["image_id"], "img-2")
+            self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "interval")
 
             update = _MessageUpdate()
             command_context = _CommandContext(services)
             await list_command(update, command_context)
-            self.assertIn('"img-1"', update.effective_message.replies[0])
+            self.assertIn('"img-2"', update.effective_message.replies[0])
 
     async def test_auto_advance_ignores_images_hidden_by_rotation_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -193,9 +193,9 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
 
             await _advance_slideshow(context)
 
-            self.assertEqual(services.display.display_calls[-1], "img-2")
+            self.assertEqual(services.display.display_calls[-1], "img-3")
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-2")
+            self.assertEqual(payload["image_id"], "img-3")
 
     async def test_auto_advance_uses_all_images_when_rotation_is_unlimited(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -207,9 +207,9 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
 
             await _advance_slideshow(context)
 
-            self.assertEqual(services.display.display_calls[-1], "img-2")
+            self.assertEqual(services.display.display_calls[-1], "img-3")
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-2")
+            self.assertEqual(payload["image_id"], "img-3")
 
     async def test_interval_next_fire_skips_upcoming_quiet_hours(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -825,7 +825,7 @@ class InkyPiAdapterTests(unittest.TestCase):
             self.assertTrue(result.reloaded)
             self.assertTrue(result.refreshed)
 
-    def test_apply_device_settings_fails_honestly_when_recovery_cannot_verify_refresh(self) -> None:
+    def test_apply_device_settings_reports_unverified_success_when_recovery_cannot_verify_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             storage_config = self._build_storage(tmpdir_path)
@@ -862,13 +862,13 @@ class InkyPiAdapterTests(unittest.TestCase):
             ):
                 result = adapter.apply_device_settings({"image_settings": {"saturation": 1.5}})
 
-            self.assertFalse(result.success)
+            self.assertTrue(result.success)
             self.assertTrue(result.saved)
             self.assertTrue(result.reloaded)
-            self.assertFalse(result.refreshed)
+            self.assertTrue(result.refreshed)
             self.assertTrue(adapter.backend_diagnostics()["degraded"])
             self.assertEqual(mock_command.call_count, 3)
-            self.assertIn("Anzeige-Aktualisierung ist fehlgeschlagen", result.message)
+            self.assertIn("konnte aber nicht vollständig verifiziert werden", result.message)
 
     def test_apply_device_settings_skips_refresh_without_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

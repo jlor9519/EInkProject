@@ -510,17 +510,17 @@ class DatabaseTests(unittest.TestCase):
                     )
                 )
 
-            # Starting from img-b in vertical pool: img-b, img-c, img-a (wrap)
+            # Starting from img-b in vertical pool: img-b, img-a, img-c (newest-first wrap)
             ordered = database.get_all_displayed_images_ordered("img-b", "vertical")
-            self.assertEqual([r.image_id for r in ordered], ["img-b", "img-c", "img-a"])
+            self.assertEqual([r.image_id for r in ordered], ["img-b", "img-a", "img-c"])
 
-            # Starting from img-c in vertical pool: img-c, img-a (wrap), img-b (wrap)
+            # Starting from img-c in vertical pool: img-c, img-b, img-a (newest-first wrap)
             ordered = database.get_all_displayed_images_ordered("img-c", "vertical")
-            self.assertEqual([r.image_id for r in ordered], ["img-c", "img-a", "img-b"])
+            self.assertEqual([r.image_id for r in ordered], ["img-c", "img-b", "img-a"])
 
             # No orientation filter: all 4 images, starting from img-c
             ordered = database.get_all_displayed_images_ordered("img-c", None)
-            self.assertEqual([r.image_id for r in ordered], ["img-c", "img-d", "img-a", "img-b"])
+            self.assertEqual([r.image_id for r in ordered], ["img-c", "img-b", "img-a", "img-d"])
 
     def test_orientation_aware_queries_filter_active_library(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -603,7 +603,7 @@ class DatabaseTests(unittest.TestCase):
                 [record.image_id for record in database.get_next_images("shared-displayed", 3, "horizontal")],
                 ["horizontal-displayed"],
             )
-            self.assertEqual(database.get_displayed_image_position("vertical-displayed", "vertical"), 2)
+            self.assertEqual(database.get_displayed_image_position("vertical-displayed", "vertical"), 1)
             self.assertEqual(database.get_displayed_image_position("horizontal-displayed", "vertical"), 0)
             self.assertEqual(database.get_oldest_rendered_image_for_orientation("vertical").image_id, "vertical-rendered")
             self.assertEqual(database.get_oldest_rendered_image_for_orientation("horizontal"), None)
@@ -727,7 +727,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(database.count_displayed_images("vertical"), 3)
             self.assertEqual(
                 [record.image_id for record in database.get_all_displayed_images_ordered("shared-old", "vertical")],
-                ["shared-old", "vertical-mid", "vertical-newest"],
+                ["shared-old", "vertical-newest", "vertical-mid"],
             )
 
     def test_rotation_limit_zero_means_unlimited(self) -> None:
