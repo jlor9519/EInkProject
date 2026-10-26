@@ -48,6 +48,8 @@ from app.time_utils import local_today_iso
 ) = range(5)
 PENDING_SUBMISSION_KEY = "pending_submission"
 UPLOAD_QUEUE_KEY = "upload_queue"
+# bot_data key of the upload ConversationHandler, so the settings menu can hand photos over to it.
+PHOTO_CONVERSATION_KEY = "photo_conversation"
 
 
 def _discard_pending_submission(context: ContextTypes.DEFAULT_TYPE) -> None:

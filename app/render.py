@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
 
@@ -24,15 +26,20 @@ _CAPTION_BG = "#FFFFFF"
 _ICON_TEXT_GAP = 6
 _METADATA_LINE_GAP = 2
 _BLUR_RADIUS = 18
+# Upper bound for stored prepared images (~18 MB as RGB), relevant for very long panoramas.
+_MAX_PREPARED_PIXELS = 6_000_000
 
 
-def _open_prepared(path: Path, max_side: int) -> Image.Image:
+def _open_prepared(path: Path, max_side: int | Callable[[tuple[int, int]], int]) -> Image.Image:
     """Open an image upright, in RGB, and no larger than max_side on its longest edge.
 
-    The draft call lets JPEGs decode at a reduced scale, so a large photo never has to be held
-    in memory at full resolution (the Pi Zero 2 W only has 512 MB).
+    max_side may be a function of the original (width, height). The draft call lets JPEGs decode
+    at a reduced scale, so a large photo never has to be held in memory at full resolution (the
+    Pi Zero 2 W only has 512 MB).
     """
     with Image.open(path) as image:
+        if callable(max_side):
+            max_side = max_side(image.size)
         longest = max(image.size)
         if longest > max_side:
             scale = max_side / longest
@@ -56,13 +63,23 @@ class RenderService:
         caption: str,
     ) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        # Twice the panel size is plenty for cropping/fitting and keeps the PNG a few MB.
-        prepared = _open_prepared(original_path, self._max_prepared_side())
+        prepared = _open_prepared(original_path, self._max_prepared_side)
         prepared.save(output_path, format="PNG")
         return output_path
 
-    def _max_prepared_side(self) -> int:
-        return 2 * max(self.config.width, self.config.height)
+    def _max_prepared_side(self, size: tuple[int, int]) -> int:
+        """Longest edge to keep for an image of the given size.
+
+        Twice the panel size is plenty for normal photos and keeps the PNG a few MB. The shorter
+        edge is kept at least as long as the panel's longer edge, so "fill" never has to enlarge
+        a panorama, in either orientation. A pixel cap bounds memory for extreme panoramas.
+        """
+        width, height = max(1, size[0]), max(1, size[1])
+        panel_long = max(self.config.width, self.config.height)
+        longest, shortest = max(width, height), min(width, height)
+        limit = max(2 * panel_long, math.ceil(longest * panel_long / shortest))
+        pixel_cap = math.floor(longest * math.sqrt(_MAX_PREPARED_PIXELS / (width * height)))
+        return max(1, min(limit, pixel_cap))
 
     @staticmethod
     def thumbnail_jpeg(image_path: Path, max_side: int = 1280) -> BytesIO:
@@ -92,7 +109,7 @@ class RenderService:
         photo_height = max(1, height - caption_bar_height)
         margin = self.config.margin
 
-        prepared = _open_prepared(original_path, self._max_prepared_side())
+        prepared = _open_prepared(original_path, self._max_prepared_side)
 
         bg_color = ImageColor.getrgb(_CAPTION_BG)
         final = Image.new("RGB", (width, height), bg_color)

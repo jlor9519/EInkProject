@@ -27,6 +27,7 @@ from app.commands import (
     get_display_lock,
     get_services,
 )
+from app.conversations import _IMAGE_MESSAGE_FILTER, PHOTO_CONVERSATION_KEY
 from app.display_state import (
     begin_display_transition,
     clear_display_transition,
@@ -41,6 +42,9 @@ PENDING_SETTINGS_KEY = "pending_settings_choice"
 PENDING_IMAGE_TUNING_FIELD_KEY = "pending_image_tuning_field"
 IMAGE_TUNING_DRAFT_KEY = "image_tuning_draft"
 IMAGE_TUNING_BASE_KEY = "image_tuning_base"
+# Set when a photo arrives while a setting is still being applied: the menu closes once it is done.
+CLOSE_SETTINGS_AFTER_APPLY_KEY = "close_settings_after_apply"
+_SETTINGS_BUSY_TEXT = "Die Einstellung wird gerade noch angewendet. Bitte warte einen Moment."
 SETTINGS_CALLBACK_PREFIX = "settings|"
 
 
@@ -628,6 +632,10 @@ async def _show_settings_menu(
     services = get_services(context)
     context.user_data.pop(PENDING_SETTINGS_KEY, None)
     _clear_image_tuning_state(context)
+    if context.user_data.pop(CLOSE_SETTINGS_AFTER_APPLY_KEY, False):
+        # A photo upload was started meanwhile; free the chat for its questions.
+        await _respond_settings_message(update, notice or "Einstellungen geschlossen.")
+        return ConversationHandler.END
     try:
         snapshot = _load_settings_snapshot(services)
     except Exception as exc:
@@ -1093,6 +1101,40 @@ async def _settings_unexpected(update: Update, context: ContextTypes.DEFAULT_TYP
     return WAITING_FOR_SETTINGS_VALUE if state is not None else WAITING_FOR_SETTINGS_CHOICE
 
 
+async def _forward_to_photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    photo_conversation = context.application.bot_data.get(PHOTO_CONVERSATION_KEY)
+    if photo_conversation is None:
+        return
+    check = photo_conversation.check_update(update)
+    if check is not None and check is not False:
+        await photo_conversation.handle_update(update, context.application, check, context)
+
+
+async def _settings_image_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """A photo sent while the settings menu is open closes the menu and starts the upload."""
+    context.user_data.pop(PENDING_SETTINGS_KEY, None)
+    _clear_image_tuning_state(context)
+    await _forward_to_photo_upload(update, context)
+    return ConversationHandler.END
+
+
+async def _settings_image_while_busy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """A photo sent while a setting is still being applied starts the upload; the menu closes after."""
+    context.user_data[CLOSE_SETTINGS_AFTER_APPLY_KEY] = True
+    await _forward_to_photo_upload(update, context)
+    return ConversationHandler.END
+
+
+async def _settings_busy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Answer input that arrives while a setting is still being applied (InkyPi restart)."""
+    if update.callback_query is not None:
+        await _safe_answer(update.callback_query, _SETTINGS_BUSY_TEXT)
+    elif update.effective_message is not None:
+        await update.effective_message.reply_text(_SETTINGS_BUSY_TEXT)
+    # The return value of WAITING handlers does not change the conversation state.
+    return ConversationHandler.END
+
+
 async def _settings_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop(PENDING_SETTINGS_KEY, None)
     _clear_image_tuning_state(context)
@@ -1111,15 +1153,26 @@ def build_settings_conversation() -> ConversationHandler:
         ],
         fallbacks=[],
         states={
+            # Photos close the menu and start an upload instead of being swallowed. These handlers
+            # block, so further photos of the same album reach the upload conversation in order.
             WAITING_FOR_SETTINGS_CHOICE: [
                 CallbackQueryHandler(settings_callback, pattern=r"^settings\|"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_settings_choice),
+                MessageHandler(_IMAGE_MESSAGE_FILTER, _settings_image_received, block=True),
                 MessageHandler(filters.ALL & ~filters.COMMAND, _settings_unexpected),
             ],
             WAITING_FOR_SETTINGS_VALUE: [
                 CallbackQueryHandler(settings_callback, pattern=r"^settings\|"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_settings_value),
+                MessageHandler(_IMAGE_MESSAGE_FILTER, _settings_image_received, block=True),
                 MessageHandler(filters.ALL & ~filters.COMMAND, _settings_unexpected),
+            ],
+            # While a setting is being applied (non-blocking), answer input here instead of letting
+            # it fall through to other handlers such as an open upload.
+            ConversationHandler.WAITING: [
+                CallbackQueryHandler(_settings_busy, pattern=r"^settings\|", block=True),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, _settings_busy, block=True),
+                MessageHandler(_IMAGE_MESSAGE_FILTER, _settings_image_while_busy, block=True),
             ],
             # TypeHandler: the timeout runs with the last update, which is often a button tap.
             ConversationHandler.TIMEOUT: [

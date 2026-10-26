@@ -27,7 +27,7 @@ from app.commands import (
     users_command,
     whitelist_command,
 )
-from app.conversations import build_photo_conversation, process_queued_upload
+from app.conversations import PHOTO_CONVERSATION_KEY, build_photo_conversation, process_queued_upload
 from app.display_state import DISPLAY_TRANSITION_KEYS, read_current_payload_image_id
 from app.settings_conversation import build_settings_conversation
 from app.models import AppServices
@@ -134,10 +134,12 @@ def build_application(services: AppServices) -> Application:
     application.add_error_handler(_application_error_handler)
 
     # Settings first: if it is opened during an upload, typed values must reach the settings menu.
-    # When settings is not open it only reacts to /settings and its open button, so uploads are
-    # unaffected.
+    # When settings is not open it only reacts to /settings and its open button; while it is open,
+    # photos are handed over to the upload conversation (kept in bot_data for that).
+    photo_conversation = build_photo_conversation()
+    application.bot_data[PHOTO_CONVERSATION_KEY] = photo_conversation
     application.add_handler(build_settings_conversation())
-    application.add_handler(build_photo_conversation())
+    application.add_handler(photo_conversation)
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("myid", myid_command))

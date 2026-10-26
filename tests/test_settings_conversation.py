@@ -4,12 +4,21 @@ import asyncio
 import tempfile
 import threading
 import unittest
+import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from telegram import CallbackQuery, Chat, Message, PhotoSize, Update, User
 from telegram.ext import ConversationHandler
 
+from app.conversations import (
+    PENDING_SUBMISSION_KEY,
+    PHOTO_CONVERSATION_KEY,
+    WAITING_FOR_TEXT_CHOICE,
+    build_photo_conversation,
+)
 from app.database import Database
 from app.models import DeviceSettingsApplyResult, DisplayResult, ImageRecord
 from app.settings_conversation import (
@@ -17,6 +26,8 @@ from app.settings_conversation import (
     PENDING_SETTINGS_KEY,
     WAITING_FOR_SETTINGS_CHOICE,
     WAITING_FOR_SETTINGS_VALUE,
+    _SETTINGS_BUSY_TEXT,
+    build_settings_conversation,
     receive_settings_value,
     settings_callback,
     settings_entry,
@@ -549,6 +560,117 @@ class OrientationSwitchTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(services.display.display_calls, ["img-h"])
+
+class SettingsAndUploadRoutingTests(unittest.IsolatedAsyncioTestCase):
+    """Drive the real ConversationHandlers the way bot.py registers them (settings first)."""
+
+    def setUp(self) -> None:
+        self.services = _FakeServices(is_admin=True)
+        self.services.auth.is_whitelisted = lambda user_id: True
+        self.release_apply = threading.Event()
+        self.services.display.set_slideshow_interval = self._slow_set_interval
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # PTB's per_message hint, same as for the real app
+            self.settings = build_settings_conversation()
+            self.photo = build_photo_conversation()
+        self.application = SimpleNamespace(
+            bot_data={
+                "services": self.services,
+                "display_lock": asyncio.Lock(),
+                "upload_queue": asyncio.Queue(),
+                PHOTO_CONVERSATION_KEY: self.photo,
+            },
+            bot=None,
+            job_queue=None,
+            create_task=lambda coroutine, update=None, name=None: asyncio.create_task(coroutine),
+        )
+        self.context = SimpleNamespace(application=self.application, user_data={}, bot=None)
+        self.user = User(11, "Admin", False)
+        self.chat = Chat(11, "private")
+        self.key = (11, 11)
+        self.replies: list[str] = []
+        self.answers: list[str | None] = []
+        patches = [
+            patch.object(Message, "reply_text", new=self._record_reply),
+            patch.object(CallbackQuery, "answer", new=self._record_answer),
+            patch("app.conversations._download_image", new=self._fake_download),
+            warnings.catch_warnings(),
+        ]
+        for item in patches:
+            item.__enter__()
+            self.addCleanup(item.__exit__, None, None, None)
+        warnings.simplefilter("ignore")
+
+    def _slow_set_interval(self, seconds: int) -> DeviceSettingsApplyResult:
+        self.release_apply.wait(5)
+        return DeviceSettingsApplyResult(True, "ok", {}, None)
+
+    async def _record_reply(self, text, *args, **kwargs):
+        self.replies.append(text)
+
+    async def _record_answer(self, text=None, *args, **kwargs):
+        self.answers.append(text)
+
+    async def _fake_download(self, services, message, user_id):
+        token = message.photo[-1].file_id
+        return {"image_id": token, "telegram_file_id": token, "original_path": f"/tmp/{token}.jpg"}, None
+
+    def _message(self, update_id: int, **kwargs) -> Update:
+        message = Message(update_id, datetime.now(timezone.utc), self.chat, from_user=self.user, **kwargs)
+        return Update(update_id, message=message)
+
+    def _photo(self, update_id: int, token: str) -> Update:
+        return self._message(update_id, photo=[PhotoSize(token, token, 10, 10)])
+
+    def _tap(self, update_id: int, data: str) -> Update:
+        message = Message(update_id, datetime.now(timezone.utc), self.chat, from_user=self.user, text="menu")
+        return Update(update_id, callback_query=CallbackQuery(str(update_id), self.user, "inst", data=data, message=message))
+
+    async def _dispatch(self, update: Update) -> str | None:
+        """Hand the update to the first matching handler, like the Application does within a group."""
+        for name, handler in (("settings", self.settings), ("photo", self.photo)):
+            check = handler.check_update(update)
+            if check is not None and check is not False:
+                await handler.handle_update(update, self.application, check, self.context)
+                return name
+        return None
+
+    async def test_photo_while_settings_menu_is_open_starts_upload(self) -> None:
+        self.settings._conversations[self.key] = WAITING_FOR_SETTINGS_CHOICE
+
+        await self._dispatch(self._photo(1, "one"))
+
+        self.assertNotIn(self.key, self.settings._conversations)
+        self.assertEqual(self.photo._conversations[self.key], WAITING_FOR_TEXT_CHOICE)
+        self.assertEqual(self.context.user_data[PENDING_SUBMISSION_KEY]["image_id"], "one")
+        self.assertIn("Möchtest du Text hinzufügen", self.replies[-1])
+
+        # Typed answers now reach the upload, not the closed settings menu.
+        self.assertEqual(await self._dispatch(self._message(2, text="Ja")), "photo")
+
+    async def test_input_while_a_setting_is_applied_is_answered_and_not_misrouted(self) -> None:
+        self.settings._conversations[self.key] = WAITING_FOR_SETTINGS_VALUE
+        self.context.user_data[PENDING_SETTINGS_KEY] = 3  # display time
+        await self._dispatch(self._message(1, text="2h"))  # starts the slow, non-blocking apply
+
+        self.assertEqual(await self._dispatch(self._message(2, text="3h")), "settings")
+        self.assertEqual(self.replies[-1], _SETTINGS_BUSY_TEXT)
+        self.assertEqual(await self._dispatch(self._tap(3, "settings|menu")), "settings")
+        self.assertEqual(self.answers[-1], _SETTINGS_BUSY_TEXT)
+
+        # A photo meanwhile starts the upload, and the menu closes once the setting is applied.
+        await self._dispatch(self._photo(4, "one"))
+        self.assertEqual(self.photo._conversations[self.key], WAITING_FOR_TEXT_CHOICE)
+        self.release_apply.set()
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            self.settings.check_update(self._message(5, text="x"))  # resolves the finished apply
+            if self.key not in self.settings._conversations:
+                break
+        self.assertNotIn(self.key, self.settings._conversations)
+        self.assertIn("Anzeigedauer ist jetzt", self.replies[-1])
+        self.assertEqual(await self._dispatch(self._message(6, text="Ja")), "photo")
+
 
 class _FakeAuth:
     def __init__(self, *, is_admin: bool):

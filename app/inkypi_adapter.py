@@ -187,9 +187,11 @@ class InkyPiAdapter:
             current = self.read_device_settings()
             merged = _merge_device_settings(current, updates)
             refresh_info = merged.get("refresh_info")
-            if refresh_current and isinstance(refresh_info, dict):
+            if refresh_current and "image_settings" in updates and isinstance(refresh_info, dict):
                 # InkyPi skips a refresh whose image hash matches the last one, and applies image
-                # settings after that check. Forget the hash so the refresh below is really drawn.
+                # settings after that check. Forget the hash so the new image settings are really
+                # drawn. Other changes (interval, quiet hours) keep the hash, so InkyPi does not
+                # redraw an unchanged image.
                 merged["refresh_info"] = {**refresh_info, "image_hash": None}
             _write_device_json(device_config_path, merged)
             confirmed = self.read_device_settings()

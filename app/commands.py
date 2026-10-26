@@ -49,10 +49,10 @@ def get_active_orientation(services: AppServices) -> str:
     return services.display.current_orientation()
 
 
-async def _safe_answer(query) -> None:
+async def _safe_answer(query, text: str | None = None) -> None:
     """Answer a callback query, ignoring failures such as a query that is already too old."""
     try:
-        await query.answer()
+        await (query.answer(text) if text else query.answer())
     except (BadRequest, TimedOut) as exc:
         logger.info("Could not answer callback query: %s", exc)
 
