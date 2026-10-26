@@ -45,6 +45,18 @@ class RenderService:
             prepared.save(output_path, format="PNG")
         return output_path
 
+    @staticmethod
+    def thumbnail_jpeg(image_path: Path, max_side: int = 1280) -> BytesIO:
+        """Small JPEG copy of an image, well below Telegram's 10 MB photo limit."""
+        with Image.open(image_path) as image:
+            prepared = ImageOps.exif_transpose(image).convert("RGB")
+        prepared.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        buf = BytesIO()
+        prepared.save(buf, format="JPEG", quality=85)
+        buf.seek(0)
+        buf.name = "preview.jpg"
+        return buf
+
     def compose_preview(
         self,
         original_path: Path,

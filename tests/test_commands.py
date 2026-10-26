@@ -9,9 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from PIL import Image
+
 from app.commands import (
     _delete_cancel_callback,
     _delete_confirm_callback,
+    _delete_select_callback,
     command_action_callback,
     delete_command,
     help_command,
@@ -23,6 +26,7 @@ from app.commands import (
 )
 from app.database import Database
 from app.inkypi_adapter import InkyPiAdapter
+from app.render import RenderService
 from app.models import DisplayConfig, DisplayResult, ImageRecord, InkyPiConfig, StorageConfig
 
 
@@ -247,6 +251,43 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             await _delete_confirm_callback(_FakeUpdate(data="del|y|img-2", has_media=False), context)
 
             self.assertIsNone(services.database.get_image_by_id("img-2"))
+
+    async def test_delete_preview_sends_small_jpeg_then_removes_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            services = _build_services(base_dir)
+            services.renderer = SimpleNamespace(thumbnail_jpeg=RenderService.thumbnail_jpeg)
+            _seed_current_and_other_image(base_dir, services)
+            original = base_dir / "incoming" / "img-2.jpg"
+            original.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (4000, 3000), "red").save(original, format="PNG")
+            context = _FakeContext(services)
+
+            await _delete_select_callback(_FakeUpdate(data="del|s|1|img-2", has_media=False), context)
+
+            self.assertEqual(len(context.bot.sent_photos), 1)
+            with Image.open(context.bot.sent_photos[0]["photo"]) as preview:
+                self.assertEqual(preview.format, "JPEG")
+                self.assertLessEqual(max(preview.size), 1280)
+            self.assertEqual(context.bot.deleted_messages, [(111, 222)])
+
+    async def test_delete_preview_falls_back_to_text_when_photo_send_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            services = _build_services(base_dir)
+            services.renderer = SimpleNamespace(thumbnail_jpeg=RenderService.thumbnail_jpeg)
+            _seed_current_and_other_image(base_dir, services)
+            original = base_dir / "incoming" / "img-2.jpg"
+            original.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (100, 100), "red").save(original, format="JPEG")
+            context = _FakeContext(services)
+            context.bot.fail_send_photo = True
+            update = _FakeUpdate(data="del|s|1|img-2", has_media=False)
+
+            await _delete_select_callback(update, context)
+
+            self.assertEqual(context.bot.deleted_messages, [])
+            self.assertIn("Dieses Bild löschen?", update.callback_query.text_edits[-1])
 
     async def test_list_command_uses_upload_timestamp_for_images_without_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1526,6 +1567,13 @@ class _FakeJobQueue:
 class _FakeBot:
     def __init__(self) -> None:
         self.deleted_messages: list[tuple[int | None, int | None]] = []
+        self.sent_photos: list[dict[str, object]] = []
+        self.fail_send_photo = False
+
+    async def send_photo(self, **kwargs) -> None:
+        if self.fail_send_photo:
+            raise RuntimeError("simulated send failure")
+        self.sent_photos.append(kwargs)
 
     async def delete_message(self, chat_id=None, message_id=None) -> None:
         self.deleted_messages.append((chat_id, message_id))

@@ -192,6 +192,31 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all((r.location, r.taken_at, r.caption) == ("Berlin", "2026-03-18", "Urlaub") for r in records))
             self.assertLess(records[0].created_at, records[1].created_at)
 
+    async def test_photo_entry_replaces_stale_pending_upload(self) -> None:
+        # A conversation that ended without cleanup must not block or hijack the next upload.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            context = _FakeContext(_FakeApplication(services))
+            stale_path = tmpdir_path / "incoming" / "stale.jpg"
+            stale_path.parent.mkdir(parents=True, exist_ok=True)
+            stale_path.write_bytes(b"stale")
+            context.user_data[PENDING_SUBMISSION_KEY] = {
+                "image_id": "stale",
+                "telegram_file_id": "file-stale",
+                "original_path": str(stale_path),
+                "caption": "",
+                "orientation_bucket": "horizontal",
+            }
+            update = _FakeUpdate(user_id=1, chat_id=101, photo_token="one")
+
+            result = await photo_entry(update, context)
+
+            self.assertEqual(result, WAITING_FOR_TEXT_CHOICE)
+            self.assertFalse(stale_path.exists())
+            self.assertEqual(context.user_data[PENDING_SUBMISSION_KEY]["telegram_file_id"], "file-one")
+            self.assertNotIn("bereits einen Upload", update.effective_message.replies[-1])
+
     async def test_photo_from_another_album_is_not_mixed_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             services = _build_services(Path(tmpdir))

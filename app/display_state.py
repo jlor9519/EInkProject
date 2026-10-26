@@ -22,6 +22,9 @@ DISPLAY_TRANSITION_KEYS = (
 )
 CURRENT_IMAGE_VERIFICATION_STATE_KEY = "current_image_verification_state"
 CURRENT_IMAGE_VERIFICATION_DETAIL_KEY = "current_image_verification_detail"
+# After a rotation image fails to display, the next attempt continues after it instead of
+# retrying the same image forever.
+ROTATION_SKIP_FROM_KEY = "rotation_skip_from_image_id"
 # A new image whose display fails goes back into the waiting queue. Retries happen about once
 # a minute, so this tolerates roughly half an hour of InkyPi being unavailable before giving up.
 MAX_NEW_IMAGE_DISPLAY_ATTEMPTS = 30
@@ -67,6 +70,7 @@ def commit_display_success(
         "current_image_displayed_at": timestamp,
         CURRENT_IMAGE_VERIFICATION_STATE_KEY: verification_state,
         CURRENT_IMAGE_VERIFICATION_DETAIL_KEY: verification_detail,
+        ROTATION_SKIP_FROM_KEY: None,
     }
     if mark_new_image:
         settings["last_new_image_displayed_at"] = timestamp
@@ -76,6 +80,32 @@ def commit_display_success(
         clear_keys=DISPLAY_TRANSITION_KEYS,
     )
     return timestamp
+
+
+def next_rotation_target(
+    database,
+    current_image_id: str,
+    active_orientation: str | None,
+) -> ImageRecord | None:
+    """Pick the next rotation image, skipping past an image whose display just failed."""
+    skip_from = database.get_setting(ROTATION_SKIP_FROM_KEY) or None
+    if skip_from and skip_from != current_image_id:
+        target = database.get_adjacent_image(skip_from, "next", active_orientation)
+        if target is not None and target.image_id != current_image_id:
+            return target
+        # Wrapped around (or the failed image is gone): start over from the current image.
+        database.set_settings({ROTATION_SKIP_FROM_KEY: None})
+    return database.get_adjacent_image(current_image_id, "next", active_orientation)
+
+
+def record_rotation_display_failure(database, image_id: str) -> None:
+    """Clear the display transition and make the next attempt continue after this image."""
+    database.set_settings(
+        {
+            **{key: None for key in DISPLAY_TRANSITION_KEYS},
+            ROTATION_SKIP_FROM_KEY: image_id,
+        }
+    )
 
 
 def record_new_image_display_failure(database, record: ImageRecord, message: str) -> bool:

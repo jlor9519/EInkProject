@@ -777,6 +777,54 @@ class InkyPiAdapterTests(unittest.TestCase):
             self.assertEqual(device_config["image_settings"]["saturation"], 1.8)
             self.assertEqual(device_config["image_settings"]["contrast"], 1.4)
 
+    def test_apply_device_settings_forces_redraw_and_keeps_inkypi_refresh_info(self) -> None:
+        # InkyPi skips a refresh whose image hash is unchanged, and applies image settings after
+        # that check, so the hash must be cleared before the restart for the new values to show.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            storage_config = self._build_storage(tmpdir_path)
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            self._write_device_config(tmpdir_path, orientation="horizontal", image_settings={"saturation": 1.4})
+            device_path = tmpdir_path / "InkyPi" / "src" / "config" / "device.json"
+            data = json.loads(device_path.read_text(encoding="utf-8"))
+            data["refresh_info"] = {"image_hash": "old-hash", "plugin_id": "telegram_frame"}
+            device_path.write_text(json.dumps(data), encoding="utf-8")
+            storage_config.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            storage_config.current_payload_path.write_text(json.dumps({"image_id": "img-1"}), encoding="utf-8")
+            adapter = InkyPiAdapter(inkypi_config, storage_config, self._build_display_config())
+            hash_at_restart: list[object] = []
+
+            def fake_run(command, **kwargs):
+                if "restart" in command:
+                    current = json.loads(device_path.read_text(encoding="utf-8"))
+                    hash_at_restart.append(current["refresh_info"]["image_hash"])
+                    return _FakeCompletedProcess(returncode=0)
+                return _FakeCompletedProcess(returncode=0, stdout="active\n")
+
+            def fake_urlopen(target, timeout=None):
+                if getattr(target, "data", None):
+                    # InkyPi records the new refresh after drawing.
+                    current = json.loads(device_path.read_text(encoding="utf-8"))
+                    current["refresh_info"] = {"image_hash": "new-hash", "plugin_id": "telegram_frame"}
+                    device_path.write_text(json.dumps(current), encoding="utf-8")
+                return _FakeHttpResponse('{"message":"ok"}')
+
+            with patch("app.inkypi_adapter.subprocess.run", side_effect=fake_run), patch(
+                "app.inkypi_adapter.request.urlopen", side_effect=fake_urlopen
+            ):
+                result = adapter.apply_device_settings({"image_settings": {"saturation": 1.8}})
+
+            self.assertTrue(result.success)
+            self.assertEqual(hash_at_restart, [None])
+            final = json.loads(device_path.read_text(encoding="utf-8"))
+            self.assertEqual(final["refresh_info"]["image_hash"], "new-hash")
+            self.assertEqual(final["image_settings"]["saturation"], 1.8)
+
     def test_apply_device_settings_waits_for_http_server_before_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)

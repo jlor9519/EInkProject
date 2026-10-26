@@ -8,10 +8,25 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    TypeHandler,
+    filters,
+)
 
 from app.auth import require_admin
-from app.commands import _delete_query_message, _display_target, _edit_query_message, get_display_lock, get_services
+from app.commands import (
+    _delete_query_message,
+    _display_target,
+    _edit_query_message,
+    _safe_answer,
+    get_display_lock,
+    get_services,
+)
 from app.display_state import (
     begin_display_transition,
     clear_display_transition,
@@ -650,7 +665,7 @@ async def _authorize_settings_callback(update: Update, context: ContextTypes.DEF
     if query is None:
         return False
 
-    await query.answer()
+    await _safe_answer(query)
     if user is None:
         return False
 
@@ -1106,12 +1121,15 @@ def build_settings_conversation() -> ConversationHandler:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_settings_value),
                 MessageHandler(filters.ALL & ~filters.COMMAND, _settings_unexpected),
             ],
+            # TypeHandler: the timeout runs with the last update, which is often a button tap.
             ConversationHandler.TIMEOUT: [
-                MessageHandler(filters.ALL, _settings_timeout),
+                TypeHandler(Update, _settings_timeout),
             ],
         },
         allow_reentry=True,
         name="settings",
         persistent=False,
         conversation_timeout=120,
+        # Applying a setting can take minutes (InkyPi restart + refresh); don't hold up other users.
+        block=False,
     )

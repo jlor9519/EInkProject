@@ -11,9 +11,10 @@ from app.commands import _display_target
 from app.conversations import _cooldown_remaining, _get_cooldown_seconds
 from app.display_state import (
     begin_display_transition,
-    clear_display_transition,
     commit_display_success,
+    next_rotation_target,
     record_new_image_display_failure,
+    record_rotation_display_failure,
 )
 from app.models import DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY
 from app.time_utils import (
@@ -418,7 +419,7 @@ async def _advance_slideshow(context) -> None:
             )
             return
 
-        target = services.database.get_adjacent_image(current_image_id, "next", active_orientation)
+        target = next_rotation_target(services.database, current_image_id, active_orientation)
         if target is None:
             logger.debug("Auto-advance: no next image (only 1 in rotation?)")
             base_decision = compute_next_fire_decision(services, active_orientation, restart_interval=True)
@@ -442,8 +443,8 @@ async def _advance_slideshow(context) -> None:
             _reschedule_for(context.application, compute_next_fire_decision(services, active_orientation))
             logger.info("Auto-advanced to image %s", target.image_id)
         else:
-            logger.warning("Auto-advance failed: %s", result.message)
-            clear_display_transition(services.database)
+            logger.warning("Auto-advance to %s failed: %s", target.image_id, result.message)
+            record_rotation_display_failure(services.database, target.image_id)
             _reschedule_for(
                 context.application,
                 NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="display_error", detail=result.message),

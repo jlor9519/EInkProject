@@ -17,11 +17,12 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
 from app.auth import require_whitelist
-from app.commands import _delete_query_message, get_services
+from app.commands import _delete_query_message, _safe_answer, get_services
 from app.database import utcnow_iso
 from app.display_state import (
     DISPLAY_TRANSITION_KEYS,
@@ -172,8 +173,10 @@ async def photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return ConversationHandler.END
 
     if context.user_data.get(PENDING_SUBMISSION_KEY):
-        await message.reply_text(_ALREADY_PENDING_TEXT)
-        return WAITING_FOR_TEXT_CHOICE
+        # Entry points only run while no upload conversation is active, so this is a leftover
+        # from a conversation that ended without cleaning up.
+        logger.info("Discarding stale pending upload of user %d", user.id)
+        _discard_pending_submission(context)
 
     photo_info, error_text = await _download_image(services, message, user.id)
     if photo_info is None:
@@ -357,7 +360,7 @@ async def photo_button_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     if query is None:
         return ConversationHandler.END
-    await query.answer()
+    await _safe_answer(query)
 
     pending = context.user_data.get(PENDING_SUBMISSION_KEY)
     if pending is None:
@@ -895,8 +898,9 @@ def build_photo_conversation() -> ConversationHandler:
                 MessageHandler(_IMAGE_MESSAGE_FILTER, _make_album_photo_handler(WAITING_FOR_PREVIEW_CONFIRM)),
                 MessageHandler(filters.ALL & ~filters.COMMAND, _unexpected_preview),
             ],
+            # TypeHandler: the timeout runs with the last update, which is often a button tap.
             ConversationHandler.TIMEOUT: [
-                MessageHandler(filters.ALL, _conversation_timeout),
+                TypeHandler(Update, _conversation_timeout),
             ],
         },
         allow_reentry=False,

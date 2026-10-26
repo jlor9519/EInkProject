@@ -9,6 +9,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, TimedOut
 from telegram.ext import ContextTypes
 
 from app.auth import require_admin, require_whitelist
@@ -18,8 +19,10 @@ from app.display_state import (
     begin_display_transition,
     clear_display_transition,
     commit_display_success,
+    next_rotation_target,
     read_current_payload_image_id,
     record_new_image_display_failure,
+    record_rotation_display_failure,
 )
 from app.fs_utils import safe_unlink
 from app.models import (
@@ -44,6 +47,14 @@ def get_display_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
 
 def get_active_orientation(services: AppServices) -> str:
     return services.display.current_orientation()
+
+
+async def _safe_answer(query) -> None:
+    """Answer a callback query, ignoring failures such as a query that is already too old."""
+    try:
+        await query.answer()
+    except (BadRequest, TimedOut) as exc:
+        logger.info("Could not answer callback query: %s", exc)
 
 
 def _command_callback_data(action: str) -> str:
@@ -555,7 +566,7 @@ async def _authorize_command_callback(update: Update, context: ContextTypes.DEFA
     if query is None:
         return False
 
-    await query.answer()
+    await _safe_answer(query)
     if user is None:
         return False
 
@@ -669,7 +680,7 @@ async def _advance_once_to_next_target(
     if rendered is not None:
         target = rendered
     elif current_image_id is not None:
-        target = services.database.get_adjacent_image(current_image_id, "next", active_orientation)
+        target = next_rotation_target(services.database, current_image_id, active_orientation)
     elif allow_rendered_without_current:
         target = None
     else:
@@ -697,7 +708,7 @@ async def _advance_once_to_next_target(
         if mark_new_image:
             record_new_image_display_failure(services.database, target, result.message)
         else:
-            clear_display_transition(services.database)
+            record_rotation_display_failure(services.database, target.image_id)
 
     return target, result, mark_new_image
 
@@ -966,21 +977,28 @@ async def _delete_select_callback(update: Update, context: ContextTypes.DEFAULT_
 
     if image_path is not None:
         try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except Exception:
-            pass
-        with open(image_path, "rb") as photo:
+            # The stored images are full-resolution PNGs, often too big for send_photo.
+            preview = await asyncio.to_thread(services.renderer.thumbnail_jpeg, image_path)
             await context.bot.send_photo(
                 chat_id=chat_id,
-                photo=photo,
+                photo=preview,
                 caption=caption,
                 reply_markup=keyboard,
             )
-    else:
-        try:
-            await query.edit_message_text(caption, reply_markup=keyboard)
         except Exception:
-            logger.warning("Could not edit message for delete preview")
+            logger.warning("Could not send delete preview photo for %s", image_id, exc_info=True)
+        else:
+            # Only remove the list once the preview is there, so the dialog never disappears.
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception:
+                pass
+            return
+
+    try:
+        await query.edit_message_text(caption, reply_markup=keyboard)
+    except Exception:
+        logger.warning("Could not edit message for delete preview")
 
 
 async def _delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1098,7 +1116,7 @@ async def _delete_cancel_callback(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     if query is None:
         return
-    await query.answer()
+    await _safe_answer(query)
     await _delete_query_message(context, query)
 
 

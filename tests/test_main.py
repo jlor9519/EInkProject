@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from telegram import Update
+from telegram.ext import CallbackQueryHandler, CommandHandler, ConversationHandler
 
 from app import main as app_main
 from app.bot import build_application
@@ -93,6 +94,27 @@ class MainTests(unittest.TestCase):
 
             self.assertIsNotNone(application)
             self.assertTrue(application.error_handlers)
+
+            # Handlers that wait for a panel refresh must not hold up other users' updates.
+            handlers = application.handlers[0]
+            command_blocking = {
+                command: handler.block
+                for handler in handlers
+                if isinstance(handler, CommandHandler)
+                for command in handler.commands
+            }
+            for command in ("next", "prev", "refresh"):
+                self.assertFalse(command_blocking[command], command)
+            callback_blocking = {
+                handler.pattern.pattern: handler.block
+                for handler in handlers
+                if isinstance(handler, CallbackQueryHandler)
+            }
+            self.assertFalse(callback_blocking[r"^del\|y\|"])
+            self.assertFalse(callback_blocking[r"^cmd\|"])
+            settings = next(h for h in handlers if isinstance(h, ConversationHandler) and h.name == "settings")
+            # PTB keeps ConversationHandler.block at True and applies this value to the inner handlers.
+            self.assertIs(settings._block, False)
             database.close()
 
 

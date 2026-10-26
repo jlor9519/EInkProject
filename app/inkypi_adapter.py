@@ -186,6 +186,11 @@ class InkyPiAdapter:
         try:
             current = self.read_device_settings()
             merged = _merge_device_settings(current, updates)
+            refresh_info = merged.get("refresh_info")
+            if refresh_current and isinstance(refresh_info, dict):
+                # InkyPi skips a refresh whose image hash matches the last one, and applies image
+                # settings after that check. Forget the hash so the refresh below is really drawn.
+                merged["refresh_info"] = {**refresh_info, "image_hash": None}
             _write_device_json(device_config_path, merged)
             confirmed = self.read_device_settings()
         except PermissionError as exc:
@@ -230,8 +235,11 @@ class InkyPiAdapter:
         # Re-assert our settings in case InkyPi overwrote them during startup.
         # InkyPi may write to device.json on startup (e.g. updating latest_refresh_time from
         # its in-memory state), which can reset image_settings to stale values.
-        # We exclude playlist_config so we don't undo changes from _sync_active_plugin_instance.
-        settings_to_preserve = {k: v for k, v in merged.items() if k != "playlist_config"}
+        # We exclude playlist_config so we don't undo changes from _sync_active_plugin_instance,
+        # and refresh_info because InkyPi keeps it current itself.
+        settings_to_preserve = {
+            k: v for k, v in merged.items() if k not in {"playlist_config", "refresh_info"}
+        }
         if settings_to_preserve:
             try:
                 _write_device_json(device_config_path, settings_to_preserve)

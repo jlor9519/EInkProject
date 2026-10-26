@@ -36,6 +36,10 @@ if git -C "${PROJECT_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; the
   if [[ -n "${old_head}" && "${old_head}" != "${new_head}" ]]; then
     echo "Updated from ${old_head:0:7} to ${new_head:0:7}:"
     git -C "${PROJECT_ROOT}" log --oneline "${old_head}..${new_head}"
+    # ensure_venv above installed the old requirements; pick up dependencies added by the pull.
+    if [[ "${MOCK_INSTALL}" != "1" || "${MOCK_SKIP_PIP}" != "1" ]]; then
+      "${RUN_PYTHON}" -m pip install -r "${PROJECT_ROOT}/requirements.txt"
+    fi
   else
     echo "Already up to date ($(git -C "${PROJECT_ROOT}" rev-parse --short HEAD 2>/dev/null || echo 'unknown'))."
   fi

@@ -14,7 +14,11 @@ from app.commands import list_command
 from app.database import Database
 from app.inkypi_adapter import InkyPiAdapter
 from app.models import DisplayConfig, DisplayResult, ImageRecord, InkyPiConfig, StorageConfig
-from app.display_state import MAX_NEW_IMAGE_DISPLAY_ATTEMPTS, record_new_image_display_failure
+from app.display_state import (
+    MAX_NEW_IMAGE_DISPLAY_ATTEMPTS,
+    ROTATION_SKIP_FROM_KEY,
+    record_new_image_display_failure,
+)
 from app.slideshow import (
     STARTUP_GRACE_SECONDS,
     _advance_slideshow,
@@ -128,6 +132,36 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
 
             self.assert_future_timestamp(services.database.get_setting("slideshow_next_fire_at"))
             self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
+
+    async def test_failed_rotation_image_is_skipped_on_next_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path, interval_seconds=7200)
+            # Newest first: img-3, img-2, img-1. img-1 is current, so img-3 comes next.
+            _seed_displayed_images(tmpdir_path, services, ["img-1", "img-2", "img-3"])
+            services.display.fail_next = True
+            context = _JobContext(services)
+
+            await _advance_slideshow(context)
+            await _advance_slideshow(context)
+
+            self.assertEqual(services.display.display_calls, ["img-2"])
+            self.assertIsNone(services.database.get_setting(ROTATION_SKIP_FROM_KEY))
+
+    async def test_skip_wrapping_around_to_current_image_retries_from_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path, interval_seconds=7200)
+            _seed_displayed_images(tmpdir_path, services, ["img-1", "img-2"])
+            services.display.fail_next = True
+            context = _JobContext(services)
+
+            await _advance_slideshow(context)
+            self.assertEqual(services.database.get_setting(ROTATION_SKIP_FROM_KEY), "img-2")
+            await _advance_slideshow(context)
+
+            self.assertEqual(services.display.display_calls, ["img-2"])
+            self.assertIsNone(services.database.get_setting(ROTATION_SKIP_FROM_KEY))
 
     async def test_auto_advance_uses_command_fallback_while_http_backend_is_degraded(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
