@@ -20,8 +20,6 @@ mkdir -p \
   "${MOCK_RUNTIME_DIR}" \
   "${MOCK_DATA_DIR}/incoming" \
   "${MOCK_DATA_DIR}/rendered" \
-  "${MOCK_DATA_DIR}/cache" \
-  "${MOCK_DATA_DIR}/archive" \
   "${MOCK_DATA_DIR}/db" \
   "${MOCK_DATA_DIR}/inkypi" \
   "${MOCK_LOG_DIR}"
@@ -64,8 +62,6 @@ database:
 storage:
   incoming_dir: ${MOCK_DATA_DIR}/incoming
   rendered_dir: ${MOCK_DATA_DIR}/rendered
-  cache_dir: ${MOCK_DATA_DIR}/cache
-  archive_dir: ${MOCK_DATA_DIR}/archive
   inkypi_payload_dir: ${MOCK_DATA_DIR}/inkypi
   current_payload_path: ${MOCK_DATA_DIR}/inkypi/current.json
   current_image_path: ${MOCK_DATA_DIR}/inkypi/current.png
@@ -78,11 +74,8 @@ display:
   margin: 18
   metadata_font_size: 22
   caption_font_size: 28
-  max_caption_lines: 2
   font_path: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
-  background_color: "#F7F3EA"
   text_color: "#111111"
-  divider_color: "#3A3A3A"
 
 inkypi:
   repo_path: ${MOCK_INKYPI_DIR}

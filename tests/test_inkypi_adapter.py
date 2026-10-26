@@ -535,7 +535,6 @@ class InkyPiAdapterTests(unittest.TestCase):
             self.assertNotEqual(payload["prepared_image_path"], str(storage_config.current_image_path))
             self.assertEqual(payload["caption_bar_height"], 44)
             self.assertEqual(payload["caption_character_limit"], 72)
-            self.assertEqual(payload["caption_max_lines"], 1)
             self.assertEqual(payload["metadata_font_size"], 14)
 
             device_config = json.loads((tmpdir_path / "InkyPi" / "src" / "config" / "device.json").read_text(encoding="utf-8"))
@@ -773,9 +772,6 @@ class InkyPiAdapterTests(unittest.TestCase):
                 result = adapter.apply_device_settings({"image_settings": {"saturation": 1.8}})
 
             self.assertTrue(result.success)
-            self.assertTrue(result.saved)
-            self.assertTrue(result.reloaded)
-            self.assertTrue(result.refreshed)
             self.assertEqual(result.confirmed_settings["image_settings"]["saturation"], 1.8)
             device_config = json.loads((tmpdir_path / "InkyPi" / "src" / "config" / "device.json").read_text(encoding="utf-8"))
             self.assertEqual(device_config["image_settings"]["saturation"], 1.8)
@@ -821,9 +817,6 @@ class InkyPiAdapterTests(unittest.TestCase):
                 result = adapter.apply_device_settings({"image_settings": {"saturation": 1.5}})
 
             self.assertTrue(result.success)
-            self.assertTrue(result.saved)
-            self.assertTrue(result.reloaded)
-            self.assertTrue(result.refreshed)
 
     def test_apply_device_settings_reports_unverified_success_when_recovery_cannot_verify_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -863,9 +856,6 @@ class InkyPiAdapterTests(unittest.TestCase):
                 result = adapter.apply_device_settings({"image_settings": {"saturation": 1.5}})
 
             self.assertTrue(result.success)
-            self.assertTrue(result.saved)
-            self.assertTrue(result.reloaded)
-            self.assertTrue(result.refreshed)
             self.assertTrue(adapter.backend_diagnostics()["degraded"])
             self.assertEqual(mock_command.call_count, 3)
             self.assertIn("konnte aber nicht vollständig verifiziert werden", result.message)
@@ -898,108 +888,7 @@ class InkyPiAdapterTests(unittest.TestCase):
                 result = adapter.apply_device_settings({"image_settings": {"saturation": 1.9}})
 
             self.assertTrue(result.success)
-            self.assertTrue(result.saved)
-            self.assertTrue(result.reloaded)
-            self.assertFalse(result.refreshed)
-            self.assertTrue(result.refresh_skipped)
             self.assertIn("kein aktuelles Bild", result.message)
-
-    def test_wait_until_ready_checks_service_and_http(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
-            adapter = InkyPiAdapter(
-                self._build_config(
-                    tmpdir_path,
-                    update_method="http_update_now",
-                    update_now_url="http://127.0.0.1/update_now",
-                    refresh_command="sudo systemctl restart inkypi.service",
-                ),
-                self._build_storage(tmpdir_path),
-                self._build_display_config(),
-            )
-
-            with patch.object(adapter, "_wait_for_inkypi_service_active", return_value=None) as mock_service, patch.object(
-                adapter,
-                "_wait_for_inkypi_http_ready",
-                return_value=None,
-            ) as mock_http:
-                self.assertIsNone(adapter.wait_until_ready())
-
-            mock_service.assert_called_once()
-            mock_http.assert_called_once()
-
-    def test_wait_until_ready_continues_with_degraded_http_when_refresh_command_exists(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
-            adapter = InkyPiAdapter(
-                self._build_config(
-                    tmpdir_path,
-                    update_method="http_update_now",
-                    update_now_url="http://127.0.0.1/update_now",
-                    refresh_command="sudo systemctl restart inkypi.service",
-                ),
-                self._build_storage(tmpdir_path),
-                self._build_display_config(),
-            )
-
-            with patch.object(adapter, "_wait_for_inkypi_service_active", return_value=None) as mock_service, patch.object(
-                adapter,
-                "_wait_for_inkypi_http_ready",
-                return_value="connection refused",
-            ) as mock_http:
-                self.assertIsNone(adapter.wait_until_ready())
-
-            self.assertTrue(adapter.backend_diagnostics()["degraded"])
-            mock_service.assert_called_once()
-            mock_http.assert_called_once()
-
-    def test_wait_until_ready_in_command_mode_skips_service_and_http_checks(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
-            adapter = InkyPiAdapter(
-                self._build_config(
-                    tmpdir_path,
-                    update_method="command",
-                    update_now_url="http://127.0.0.1/update_now",
-                    refresh_command="echo refresh",
-                ),
-                self._build_storage(tmpdir_path),
-                self._build_display_config(),
-            )
-
-            with patch.object(adapter, "_wait_for_inkypi_service_active") as mock_service, patch.object(
-                adapter,
-                "_wait_for_inkypi_http_ready",
-            ) as mock_http:
-                self.assertIsNone(adapter.wait_until_ready())
-
-            mock_service.assert_not_called()
-            mock_http.assert_not_called()
-
-    def test_wait_until_ready_short_circuits_when_service_is_unavailable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
-            adapter = InkyPiAdapter(
-                self._build_config(
-                    tmpdir_path,
-                    update_method="http_update_now",
-                    update_now_url="http://127.0.0.1/update_now",
-                    refresh_command="",
-                ),
-                self._build_storage(tmpdir_path),
-                self._build_display_config(),
-            )
-
-            with patch.object(
-                adapter,
-                "_wait_for_inkypi_service_active",
-                return_value="inkypi.service ist nicht aktiv geworden.",
-            ) as mock_service, patch.object(adapter, "_wait_for_inkypi_http_ready") as mock_http:
-                result = adapter.wait_until_ready()
-
-            self.assertEqual(result, "inkypi.service ist nicht aktiv geworden.")
-            mock_service.assert_called_once()
-            mock_http.assert_not_called()
 
     def test_apply_device_settings_can_update_orientation_and_inverted_image(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1064,8 +953,6 @@ class InkyPiAdapterTests(unittest.TestCase):
                 result = adapter.apply_device_settings({"image_settings": {"saturation": 2.0}})
 
             self.assertFalse(result.success)
-            self.assertTrue(result.saved)
-            self.assertFalse(result.reloaded)
             self.assertIn("permission denied", result.message)
             device_config = json.loads((tmpdir_path / "InkyPi" / "src" / "config" / "device.json").read_text(encoding="utf-8"))
             self.assertEqual(device_config["image_settings"]["saturation"], 2.0)
@@ -1186,8 +1073,6 @@ class InkyPiAdapterTests(unittest.TestCase):
         return StorageConfig(
             incoming_dir=tmpdir_path / "incoming",
             rendered_dir=tmpdir_path / "rendered",
-            cache_dir=tmpdir_path / "cache",
-            archive_dir=tmpdir_path / "archive",
             inkypi_payload_dir=tmpdir_path / "inkypi",
             current_payload_path=tmpdir_path / "inkypi" / "current.json",
             current_image_path=tmpdir_path / "inkypi" / "current.png",
@@ -1204,11 +1089,8 @@ class InkyPiAdapterTests(unittest.TestCase):
             metadata_font_size=14,
             caption_font_size=20,
             caption_character_limit=72,
-            max_caption_lines=1,
             font_path="/tmp/does-not-exist.ttf",
-            background_color="#F7F3EA",
             text_color="#111111",
-            divider_color="#3A3A3A",
         )
 
     @staticmethod
@@ -1225,7 +1107,6 @@ class InkyPiAdapterTests(unittest.TestCase):
             validated_commit="main",
             waveshare_model="epd7in3e",
             plugin_id="telegram_frame",
-            payload_dir=tmpdir_path / "inkypi",
             update_method=update_method,
             update_now_url=update_now_url,
             refresh_command=refresh_command,

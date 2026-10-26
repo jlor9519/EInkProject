@@ -5,11 +5,10 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from app.models import ImageRecord, MaintenanceJobRecord
+from app.models import ImageRecord
 from app.orientation import ACTIVE_ORIENTATIONS, ORIENTATION_SHARED, orientation_pool
 
 DEFAULT_ROTATION_LIMIT = 100
@@ -73,21 +72,6 @@ class Database:
                     value TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS maintenance_jobs (
-                    job_id TEXT PRIMARY KEY,
-                    kind TEXT NOT NULL,
-                    requested_by_user_id INTEGER NOT NULL,
-                    telegram_chat_id INTEGER NOT NULL,
-                    status TEXT NOT NULL,
-                    unit_name TEXT,
-                    log_path TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    started_at TEXT,
-                    finished_at TEXT,
-                    notified_at TEXT,
-                    last_error TEXT
-                );
-
                 CREATE TABLE IF NOT EXISTS error_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
@@ -97,7 +81,6 @@ class Database:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_maintenance_jobs_status ON maintenance_jobs(status, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_error_log_timestamp ON error_log(timestamp DESC);
                 """
             )
@@ -267,191 +250,6 @@ class Database:
                 )
             self._connection.commit()
 
-    def get_latest_image(self) -> ImageRecord | None:
-        with self._lock:
-            row = self._connection.execute(
-                "SELECT * FROM images ORDER BY created_at DESC LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return None
-            return self._row_to_image(row)
-
-    def create_maintenance_job(
-        self,
-        *,
-        job_id: str,
-        kind: str,
-        requested_by_user_id: int,
-        telegram_chat_id: int,
-        log_path: str,
-        unit_name: str | None = None,
-        status: str = "queued",
-    ) -> MaintenanceJobRecord:
-        created_at = utcnow_iso()
-        with self._lock:
-            self._connection.execute(
-                """
-                INSERT INTO maintenance_jobs (
-                    job_id,
-                    kind,
-                    requested_by_user_id,
-                    telegram_chat_id,
-                    status,
-                    unit_name,
-                    log_path,
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (job_id, kind, requested_by_user_id, telegram_chat_id, status, unit_name, log_path, created_at),
-            )
-            self._connection.commit()
-        return self.get_maintenance_job(job_id)
-
-    def get_maintenance_job(self, job_id: str) -> MaintenanceJobRecord | None:
-        with self._lock:
-            row = self._connection.execute(
-                "SELECT * FROM maintenance_jobs WHERE job_id = ?",
-                (job_id,),
-            ).fetchone()
-            if row is None:
-                return None
-            return self._row_to_maintenance_job(row)
-
-    def get_active_maintenance_job(self) -> MaintenanceJobRecord | None:
-        with self._lock:
-            row = self._connection.execute(
-                """
-                SELECT * FROM maintenance_jobs
-                WHERE status IN ('queued', 'running', 'rebooting')
-                ORDER BY created_at ASC
-                LIMIT 1
-                """
-            ).fetchone()
-            if row is None:
-                return None
-            return self._row_to_maintenance_job(row)
-
-    def mark_maintenance_job_running(self, job_id: str) -> None:
-        self._set_maintenance_job_status(job_id, "running", started_at=utcnow_iso())
-
-    def mark_maintenance_job_rebooting(self, job_id: str) -> None:
-        self._set_maintenance_job_status(job_id, "rebooting")
-
-    def mark_maintenance_job_finished(self, job_id: str, *, status: str, last_error: str | None = None) -> None:
-        self._set_maintenance_job_status(job_id, status, finished_at=utcnow_iso(), last_error=last_error)
-
-    def complete_rebooting_maintenance_jobs(self) -> list[MaintenanceJobRecord]:
-        finished_at = utcnow_iso()
-        with self._lock:
-            self._connection.execute(
-                """
-                UPDATE maintenance_jobs
-                SET status = 'succeeded',
-                    finished_at = COALESCE(finished_at, ?)
-                WHERE status = 'rebooting'
-                """,
-                (finished_at,),
-            )
-            self._connection.commit()
-            rows = self._connection.execute(
-                """
-                SELECT * FROM maintenance_jobs
-                WHERE status = 'succeeded' AND notified_at IS NULL AND kind = 'restart'
-                ORDER BY created_at ASC
-                """
-            ).fetchall()
-            return [self._row_to_maintenance_job(row) for row in rows]
-
-    def recover_stale_maintenance_jobs(
-        self,
-        *,
-        kind: str,
-        max_queued_age_seconds: int | None = None,
-        max_running_age_seconds: int | None = None,
-        reason: str,
-    ) -> list[MaintenanceJobRecord]:
-        finished_at = utcnow_iso()
-        now = datetime.now(timezone.utc)
-        with self._lock:
-            rows = self._connection.execute(
-                """
-                SELECT * FROM maintenance_jobs
-                WHERE kind = ? AND status IN ('queued', 'running')
-                ORDER BY created_at ASC
-                """,
-                (kind,),
-            ).fetchall()
-            if not rows:
-                return []
-
-            job_ids = [
-                row["job_id"]
-                for row in rows
-                if self._is_stale_maintenance_row(
-                    row,
-                    now=now,
-                    max_queued_age_seconds=max_queued_age_seconds,
-                    max_running_age_seconds=max_running_age_seconds,
-                )
-            ]
-            if not job_ids:
-                return []
-
-            placeholders = ", ".join("?" for _ in job_ids)
-            self._connection.execute(
-                f"""
-                UPDATE maintenance_jobs
-                SET status = 'failed',
-                    finished_at = COALESCE(finished_at, ?),
-                    last_error = ?
-                WHERE job_id IN ({placeholders})
-                """,
-                (finished_at, reason, *job_ids),
-            )
-            self._connection.commit()
-            updated_rows = self._connection.execute(
-                f"""
-                SELECT * FROM maintenance_jobs
-                WHERE job_id IN ({placeholders})
-                ORDER BY created_at ASC
-                """,
-                job_ids,
-            ).fetchall()
-            return [self._row_to_maintenance_job(row) for row in updated_rows]
-
-    def recover_stale_update_jobs(
-        self,
-        *,
-        max_queued_age_seconds: int | None = None,
-        max_running_age_seconds: int | None = None,
-        reason: str = "stale maintenance job recovered after restart",
-    ) -> list[MaintenanceJobRecord]:
-        return self.recover_stale_maintenance_jobs(
-            kind="update",
-            max_queued_age_seconds=max_queued_age_seconds,
-            max_running_age_seconds=max_running_age_seconds,
-            reason=reason,
-        )
-
-    def get_unnotified_finished_maintenance_jobs(self) -> list[MaintenanceJobRecord]:
-        with self._lock:
-            rows = self._connection.execute(
-                """
-                SELECT * FROM maintenance_jobs
-                WHERE status IN ('succeeded', 'failed') AND notified_at IS NULL
-                ORDER BY created_at ASC
-                """
-            ).fetchall()
-            return [self._row_to_maintenance_job(row) for row in rows]
-
-    def mark_maintenance_job_notified(self, job_id: str) -> None:
-        with self._lock:
-            self._connection.execute(
-                "UPDATE maintenance_jobs SET notified_at = ? WHERE job_id = ?",
-                (utcnow_iso(), job_id),
-            )
-            self._connection.commit()
-
     def delete_image(self, image_id: str) -> bool:
         with self._lock:
             cursor = self._connection.execute(
@@ -471,10 +269,6 @@ class Database:
 
     _DISPLAYED_STATUSES = ("displayed", "displayed_with_warnings")
     _ROTATION_ELIGIBLE_STATUSES = ("queued", "processing", "rendered", "displayed", "displayed_with_warnings")
-
-    def get_rotation_limit(self) -> int | None:
-        with self._lock:
-            return self._get_rotation_limit_locked()
 
     def count_rotation_pool_images(self, active_orientation: str | None = None) -> int:
         with self._lock:
@@ -505,26 +299,6 @@ class Database:
                 pool_rows,
                 direction=direction,
             )
-            if row is None:
-                return None
-            return self._row_to_image(row)
-
-    def get_next_navigation_target(self, current_image_id: str, active_orientation: str | None = None) -> ImageRecord | None:
-        """Return the manual /next target, prioritizing rendered queue items."""
-        with self._lock:
-            pool_rows = self._get_rotation_pool_rows_locked(active_orientation)
-            row = next((row for row in pool_rows if row["status"] == "rendered"), None)
-            if row is None:
-                displayed_rows = [
-                    candidate
-                    for candidate in pool_rows
-                    if candidate["status"] in self._DISPLAYED_STATUSES
-                ]
-                row = self._select_relative_row_locked(
-                    current_image_id,
-                    displayed_rows,
-                    direction="next",
-                )
             if row is None:
                 return None
             return self._row_to_image(row)
@@ -565,95 +339,6 @@ class Database:
             last_error=row["last_error"],
             orientation_bucket=row["orientation_bucket"] or ORIENTATION_SHARED,
         )
-
-    def _row_to_maintenance_job(self, row: sqlite3.Row) -> MaintenanceJobRecord:
-        return MaintenanceJobRecord(
-            job_id=row["job_id"],
-            kind=row["kind"],
-            requested_by_user_id=row["requested_by_user_id"],
-            telegram_chat_id=row["telegram_chat_id"],
-            status=row["status"],
-            unit_name=row["unit_name"],
-            log_path=row["log_path"],
-            created_at=row["created_at"],
-            started_at=row["started_at"],
-            finished_at=row["finished_at"],
-            notified_at=row["notified_at"],
-            last_error=row["last_error"],
-        )
-
-    def _set_maintenance_job_status(
-        self,
-        job_id: str,
-        status: str,
-        *,
-        started_at: str | None = None,
-        finished_at: str | None = None,
-        last_error: str | None = None,
-    ) -> None:
-        with self._lock:
-            self._connection.execute(
-                """
-                UPDATE maintenance_jobs
-                SET status = ?,
-                    started_at = COALESCE(?, started_at),
-                    finished_at = COALESCE(?, finished_at),
-                    last_error = ?
-                WHERE job_id = ?
-                """,
-                (status, started_at, finished_at, last_error, job_id),
-            )
-            self._connection.commit()
-
-    @staticmethod
-    def _is_stale_maintenance_row(
-        row: sqlite3.Row,
-        *,
-        now: datetime,
-        max_queued_age_seconds: int | None,
-        max_running_age_seconds: int | None,
-    ) -> bool:
-        status = row["status"]
-        if status == "queued":
-            if max_queued_age_seconds is None:
-                return True
-            reference = Database._parse_datetime(row["created_at"])
-            if reference is None:
-                return False
-            return (now - reference).total_seconds() >= max_queued_age_seconds
-
-        if status == "running":
-            if max_running_age_seconds is None:
-                return True
-            reference = Database._parse_datetime(row["started_at"] or row["created_at"])
-            if reference is None:
-                return False
-            return (now - reference).total_seconds() >= max_running_age_seconds
-
-        return False
-
-    @staticmethod
-    def _parse_datetime(value: str | None) -> datetime | None:
-        if not value:
-            return None
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-
-    def reconcile_pending_images(self) -> list[ImageRecord]:
-        with self._lock:
-            self._connection.execute(
-                "UPDATE images SET status = 'queued' WHERE status = 'processing'"
-            )
-            rows = self._connection.execute(
-                "SELECT * FROM images WHERE status = 'queued' ORDER BY created_at ASC"
-            ).fetchall()
-            self._connection.commit()
-            return [self._row_to_image(row) for row in rows]
 
     def reconcile_runtime_state(
         self,
@@ -716,16 +401,6 @@ class Database:
                 current_image_id,
             )
         return [self._row_to_image(row) for row in rows]
-
-    def get_oldest_rendered_image(self) -> ImageRecord | None:
-        """Return the oldest image with status 'rendered' (waiting for display)."""
-        with self._lock:
-            row = self._connection.execute(
-                "SELECT * FROM images WHERE status = 'rendered' ORDER BY created_at ASC LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return None
-            return self._row_to_image(row)
 
     def get_oldest_rendered_image_for_orientation(self, active_orientation: str | None = None) -> ImageRecord | None:
         """Return the oldest rendered image visible in the active orientation pool."""
@@ -878,11 +553,6 @@ class Database:
             self._set_settings_locked(values)
             self._connection.commit()
 
-    def delete_setting(self, key: str) -> None:
-        with self._lock:
-            self._connection.execute("DELETE FROM settings WHERE key = ?", (key,))
-            self._connection.commit()
-
     _ERROR_LOG_MAX_ROWS = 50
 
     def log_error(self, source: str, message: str, *, image_id: str | None = None) -> None:
@@ -912,11 +582,6 @@ class Database:
                     (limit,),
                 ).fetchall()
         return [dict(row) for row in rows]
-
-    def clear_error_log(self) -> None:
-        with self._lock:
-            self._connection.execute("DELETE FROM error_log")
-            self._connection.commit()
 
     @staticmethod
     def _orientation_args(active_orientation: str | None) -> tuple[str, ...]:

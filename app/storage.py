@@ -62,8 +62,6 @@ class StorageService:
         return (
             self.config.incoming_dir,
             self.config.rendered_dir,
-            self.config.cache_dir,
-            self.config.archive_dir,
             self.config.inkypi_payload_dir,
             self.config.current_payload_path.parent,
             self.config.current_image_path.parent,

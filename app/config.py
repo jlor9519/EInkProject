@@ -85,8 +85,6 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     storage_config = StorageConfig(
         incoming_dir=_resolve_path(storage_section.get("incoming_dir", "data/incoming")),
         rendered_dir=_resolve_path(storage_section.get("rendered_dir", "data/rendered")),
-        cache_dir=_resolve_path(storage_section.get("cache_dir", "data/cache")),
-        archive_dir=_resolve_path(storage_section.get("archive_dir", "data/archive")),
         inkypi_payload_dir=_resolve_path(storage_section.get("inkypi_payload_dir", "data/inkypi")),
         current_payload_path=_resolve_path(storage_section.get("current_payload_path", "data/inkypi/current.json")),
         current_image_path=_resolve_path(storage_section.get("current_image_path", "data/inkypi/current.png")),
@@ -101,6 +99,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         "caption_character_limit",
         DEFAULT_CAPTION_CHARACTER_LIMIT,
     )
+    # Only read to detect the legacy caption layout; the setting itself is no longer used.
     max_caption_lines_value = display_section.get("max_caption_lines", DEFAULT_MAX_CAPTION_LINES)
 
     if (
@@ -111,7 +110,6 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         caption_height_value = DEFAULT_CAPTION_HEIGHT
         metadata_font_size_value = DEFAULT_METADATA_FONT_SIZE
         caption_font_size_value = DEFAULT_CAPTION_FONT_SIZE
-        max_caption_lines_value = DEFAULT_MAX_CAPTION_LINES
 
     display_config = DisplayConfig(
         width=_parse_positive_int(display_section.get("width", 800), "display.width", errors),
@@ -125,11 +123,8 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
             "display.caption_character_limit",
             errors,
         ),
-        max_caption_lines=_parse_positive_int(max_caption_lines_value, "display.max_caption_lines", errors),
         font_path=str(display_section.get("font_path", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")),
-        background_color=str(display_section.get("background_color", "#F7F3EA")),
         text_color=str(display_section.get("text_color", "#111111")),
-        divider_color=str(display_section.get("divider_color", "#3A3A3A")),
     )
     if display_config.caption_height >= display_config.height:
         errors.append("display.caption_height must be smaller than display.height.")
@@ -158,7 +153,6 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         validated_commit=str(inkypi_section.get("validated_commit", "main")),
         waveshare_model=str(inkypi_section.get("waveshare_model", "epd7in3e")),
         plugin_id=str(inkypi_section.get("plugin_id", "telegram_frame")),
-        payload_dir=_resolve_path(inkypi_section.get("payload_dir", storage_config.inkypi_payload_dir)),
         update_method=update_method,
         update_now_url=update_now_url,
         refresh_command=refresh_command,

@@ -29,8 +29,6 @@ class DatabaseConfig:
 class StorageConfig:
     incoming_dir: Path
     rendered_dir: Path
-    cache_dir: Path
-    archive_dir: Path
     inkypi_payload_dir: Path
     current_payload_path: Path
     current_image_path: Path
@@ -46,11 +44,8 @@ class DisplayConfig:
     metadata_font_size: int
     caption_font_size: int
     caption_character_limit: int
-    max_caption_lines: int
     font_path: str
-    background_color: str
     text_color: str
-    divider_color: str
 
 
 @dataclass(slots=True)
@@ -60,7 +55,6 @@ class InkyPiConfig:
     validated_commit: str
     waveshare_model: str
     plugin_id: str
-    payload_dir: Path
     update_method: str
     update_now_url: str
     refresh_command: str
@@ -76,22 +70,6 @@ class AppConfig:
     storage: StorageConfig
     display: DisplayConfig
     inkypi: InkyPiConfig
-
-
-@dataclass(slots=True)
-class MaintenanceJobRecord:
-    job_id: str
-    kind: str
-    requested_by_user_id: int
-    telegram_chat_id: int
-    status: str
-    unit_name: str | None
-    log_path: str
-    created_at: str
-    started_at: str | None = None
-    finished_at: str | None = None
-    notified_at: str | None = None
-    last_error: str | None = None
 
 
 @dataclass(slots=True)
@@ -159,10 +137,6 @@ class DeviceSettingsApplyResult:
     message: str
     confirmed_settings: dict[str, Any]
     device_config_path: Path | None = None
-    saved: bool = False
-    reloaded: bool = False
-    refreshed: bool = False
-    refresh_skipped: bool = False
 
 
 @dataclass(slots=True)

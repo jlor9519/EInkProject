@@ -225,7 +225,6 @@ class InkyPiAdapter:
                 ),
                 confirmed_settings=confirmed,
                 device_config_path=device_config_path,
-                saved=True,
             )
 
         # Re-assert our settings in case InkyPi overwrote them during startup.
@@ -245,9 +244,6 @@ class InkyPiAdapter:
                 message="Einstellungen wurden gespeichert und InkyPi wurde neu geladen.",
                 confirmed_settings=confirmed,
                 device_config_path=device_config_path,
-                saved=True,
-                reloaded=True,
-                refresh_skipped=True,
             )
 
         if not self.storage.current_payload_path.exists():
@@ -259,9 +255,6 @@ class InkyPiAdapter:
                 ),
                 confirmed_settings=confirmed,
                 device_config_path=device_config_path,
-                saved=True,
-                reloaded=True,
-                refresh_skipped=True,
             )
 
         http_ready_error = self._wait_for_inkypi_http_ready()
@@ -281,8 +274,6 @@ class InkyPiAdapter:
                     ),
                     confirmed_settings=confirmed,
                     device_config_path=device_config_path,
-                    saved=True,
-                    reloaded=True,
                 )
         else:
             self._clear_http_backend_degraded()
@@ -306,8 +297,6 @@ class InkyPiAdapter:
                 ),
                 confirmed_settings=confirmed,
                 device_config_path=device_config_path,
-                saved=True,
-                reloaded=True,
             )
 
         if refresh_result.verification_state == DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY:
@@ -319,9 +308,6 @@ class InkyPiAdapter:
                 ),
                 confirmed_settings=confirmed,
                 device_config_path=device_config_path,
-                saved=True,
-                reloaded=True,
-                refreshed=True,
             )
 
         return DeviceSettingsApplyResult(
@@ -329,32 +315,10 @@ class InkyPiAdapter:
             message="Einstellungen wurden gespeichert, InkyPi wurde neu geladen und die Anzeige aktualisiert.",
             confirmed_settings=confirmed,
             device_config_path=device_config_path,
-            saved=True,
-            reloaded=True,
-            refreshed=True,
         )
 
     def refresh_only(self) -> DisplayResult:
         return self._trigger_display_update(self.storage.current_payload_path)
-
-    def wait_until_ready(self) -> str | None:
-        if self.config.update_method == "command":
-            return None
-        service_error = self._wait_for_inkypi_service_active()
-        if service_error is not None:
-            return service_error
-        http_error = self._wait_for_inkypi_http_ready()
-        if http_error is None:
-            self._clear_http_backend_degraded()
-            return None
-        if self._has_refresh_command():
-            self._mark_http_backend_degraded(http_error)
-            logger.warning(
-                "InkyPi HTTP backend is not ready; continuing startup with command fallback enabled: %s",
-                http_error,
-            )
-            return None
-        return http_error
 
     def _trigger_display_update(
         self,
@@ -680,7 +644,6 @@ class InkyPiAdapter:
         payload["caption_font_size"] = self.display_config.caption_font_size
         payload["caption_character_limit"] = self.display_config.caption_character_limit
         payload["caption_margin"] = self.display_config.margin
-        payload["caption_max_lines"] = self.display_config.max_caption_lines
         payload["metadata_font_size"] = self.display_config.metadata_font_size
         payload["caption_text_color"] = self.display_config.text_color
         payload["caption_background_color"] = "#FFFFFF"
@@ -1091,21 +1054,6 @@ class InkyPiAdapter:
             not self._refresh_command_uses_explicit_paths()
             and payload_path != primary_plugin_payload_path
         )
-
-    def _restore_primary_plugin_payload_if_needed(
-        self,
-        payload_path: Path,
-        primary_plugin_payload_path: Path,
-    ) -> None:
-        if not self._command_needs_temporary_plugin_payload(payload_path, primary_plugin_payload_path):
-            return
-        restore_result = self._sync_active_plugin_instance(primary_plugin_payload_path)
-        if restore_result is not None:
-            logger.warning(
-                "Failed to restore Telegram Frame plugin payload to %s after failed recovery verification: %s",
-                primary_plugin_payload_path,
-                restore_result.message,
-            )
 
     def _mark_http_backend_degraded(self, reason: str) -> None:
         self._http_degraded_until_monotonic = time.monotonic() + HTTP_DEGRADED_COOLDOWN_SECONDS

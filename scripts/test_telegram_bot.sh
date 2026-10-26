@@ -14,8 +14,6 @@ mkdir -p \
   "${TEST_STATE_DIR}" \
   "${TEST_DATA_DIR}/incoming" \
   "${TEST_DATA_DIR}/rendered" \
-  "${TEST_DATA_DIR}/cache" \
-  "${TEST_DATA_DIR}/archive" \
   "${TEST_DATA_DIR}/db" \
   "${TEST_DATA_DIR}/inkypi" \
   "${TEST_INKYPI_DIR}/src/plugins" \
@@ -38,8 +36,6 @@ database:
 storage:
   incoming_dir: ${TEST_DATA_DIR}/incoming
   rendered_dir: ${TEST_DATA_DIR}/rendered
-  cache_dir: ${TEST_DATA_DIR}/cache
-  archive_dir: ${TEST_DATA_DIR}/archive
   inkypi_payload_dir: ${TEST_DATA_DIR}/inkypi
   current_payload_path: ${TEST_DATA_DIR}/inkypi/current.json
   current_image_path: ${TEST_DATA_DIR}/inkypi/current.png
@@ -52,11 +48,8 @@ display:
   margin: 18
   metadata_font_size: 22
   caption_font_size: 28
-  max_caption_lines: 2
   font_path: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
-  background_color: "#F7F3EA"
   text_color: "#111111"
-  divider_color: "#3A3A3A"
 
 inkypi:
   repo_path: ${TEST_INKYPI_DIR}

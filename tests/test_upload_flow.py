@@ -649,8 +649,6 @@ def _build_services_with_real_adapter(
     storage_config = StorageConfig(
         incoming_dir=base_dir / "incoming",
         rendered_dir=base_dir / "rendered",
-        cache_dir=base_dir / "cache",
-        archive_dir=base_dir / "archive",
         inkypi_payload_dir=base_dir / "inkypi",
         current_payload_path=base_dir / "inkypi" / "current.json",
         current_image_path=base_dir / "inkypi" / "current.png",
@@ -664,11 +662,8 @@ def _build_services_with_real_adapter(
         metadata_font_size=14,
         caption_font_size=20,
         caption_character_limit=72,
-        max_caption_lines=1,
         font_path="/tmp/does-not-exist.ttf",
-        background_color="#F7F3EA",
         text_color="#111111",
-        divider_color="#3A3A3A",
     )
     inkypi_config = InkyPiConfig(
         repo_path=base_dir / "InkyPi",
@@ -676,7 +671,6 @@ def _build_services_with_real_adapter(
         validated_commit="main",
         waveshare_model="epd7in3e",
         plugin_id="telegram_frame",
-        payload_dir=base_dir / "inkypi",
         update_method="http_update_now",
         update_now_url="http://127.0.0.1/update_now",
         refresh_command=refresh_command,

@@ -20,7 +20,7 @@ from telegram.ext import (
 )
 
 from app.auth import require_whitelist
-from app.commands import _delete_query_message, get_display_lock, get_services
+from app.commands import _delete_query_message, get_services
 from app.database import utcnow_iso
 from app.display_state import (
     DISPLAY_TRANSITION_KEYS,

@@ -338,7 +338,6 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.display.metadata_font_size, 14)
             self.assertEqual(config.display.caption_font_size, 20)
             self.assertEqual(config.display.caption_character_limit, 72)
-            self.assertEqual(config.display.max_caption_lines, 1)
 
 if __name__ == "__main__":
     unittest.main()

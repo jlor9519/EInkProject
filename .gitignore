@@ -28,15 +28,11 @@ telegram-bot-test/
 *.sqlite3
 data/incoming/*
 data/rendered/*
-data/cache/*
-data/archive/*
 data/db/*
 data/inkypi/*
 logs/*
 !data/incoming/.gitkeep
 !data/rendered/.gitkeep
-!data/cache/.gitkeep
-!data/archive/.gitkeep
 !data/db/.gitkeep
 !data/inkypi/.gitkeep
 !logs/.gitkeep

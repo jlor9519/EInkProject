@@ -21,7 +21,6 @@ from app.time_utils import (
     local_now,
     move_local_datetime_to_window_end,
     next_local_time_occurrence,
-    seconds_until_local_time,
     seconds_until_wake_up_time,
 )
 
@@ -114,16 +113,6 @@ def reschedule_slideshow_job(
 def _get_scheduled_time(services) -> str | None:
     """Return the scheduled daily change time as 'HH:MM', or None if disabled."""
     return services.database.get_setting("scheduled_change_time") or None
-
-
-def _seconds_until_scheduled_occurrence(time_str: str, occurrence_index: int = 0) -> int:
-    """Seconds from now until the next occurrence of HH:MM, optionally N days later."""
-    return seconds_until_local_time(time_str, occurrence_index)
-
-
-def _seconds_until_time(time_str: str) -> int:
-    """Seconds from now until the next occurrence of HH:MM (today or tomorrow)."""
-    return _seconds_until_scheduled_occurrence(time_str, 0)
 
 
 def _adjust_candidate_for_quiet_hours(

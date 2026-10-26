@@ -26,11 +26,8 @@ class RenderTests(unittest.TestCase):
                     metadata_font_size=22,
                     caption_font_size=28,
                     caption_character_limit=72,
-                    max_caption_lines=2,
                     font_path="/tmp/does-not-exist.ttf",
-                    background_color="#F7F3EA",
                     text_color="#111111",
-                    divider_color="#3A3A3A",
                 )
             )
             renderer.render(
@@ -61,11 +58,8 @@ class RenderTests(unittest.TestCase):
                     metadata_font_size=22,
                     caption_font_size=28,
                     caption_character_limit=72,
-                    max_caption_lines=2,
                     font_path="/tmp/does-not-exist.ttf",
-                    background_color="#F7F3EA",
                     text_color="#111111",
-                    divider_color="#3A3A3A",
                 )
             )
             renderer.render(
