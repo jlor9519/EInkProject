@@ -245,6 +245,29 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(decision.detail, "23:00")
             self.assertEqual(decision.seconds, 11 * 3600)
 
+    async def test_next_fire_holds_new_image_when_cooldown_active_and_queue_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir), interval_seconds=3600)
+            services.database.set_setting("new_image_cooldown", str(5 * 3600))
+            last_shown = datetime.now(timezone.utc) - timedelta(seconds=1800)
+            services.database.set_setting("last_new_image_displayed_at", last_shown.isoformat())
+
+            decision = compute_next_fire_decision(services)
+
+            self.assertEqual(decision.mode, "new_image_hold")
+            self.assertAlmostEqual(decision.seconds, 5 * 3600 - 1800, delta=5)
+
+    async def test_next_fire_falls_through_to_interval_after_cooldown_expires(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir), interval_seconds=3600)
+            services.database.set_setting("new_image_cooldown", str(5 * 3600))
+            last_shown = datetime.now(timezone.utc) - timedelta(hours=6)
+            services.database.set_setting("last_new_image_displayed_at", last_shown.isoformat())
+
+            decision = compute_next_fire_decision(services)
+
+            self.assertEqual(decision.mode, "interval")
+
     async def test_project_display_offsets_skip_future_quiet_hours(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             services = _build_services(Path(tmpdir), interval_seconds=3600)

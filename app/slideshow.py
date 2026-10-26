@@ -197,12 +197,15 @@ def compute_next_fire_decision(services, active_orientation: str | None = None) 
         )
 
     rendered_count = services.database.count_rendered_images(active_orientation)
+    cooldown = _get_cooldown_seconds(services)
+    remaining = _cooldown_remaining(services, cooldown)
     if rendered_count > 0:
-        cooldown = _get_cooldown_seconds(services)
-        remaining = _cooldown_remaining(services, cooldown)
         first = max(1, remaining) if remaining > 0 else 1
         logger.info("Next fire uses rendered queue/cooldown in %ds", first)
         return NextFireDecision(seconds=first, mode="cooldown_queue")
+    if remaining > 0:
+        logger.info("Next fire holds new image for %ds", remaining)
+        return NextFireDecision(seconds=remaining, mode="new_image_hold")
 
     scheduled = _get_scheduled_time(services)
     if scheduled:

@@ -321,9 +321,9 @@ def _prompt_text_for_setting(services, idx: int, notice: str | None = None) -> s
             [
                 f"Aktueller Wert für {s.label}: {current}",
                 "",
-                "Wie lange soll ein neues Bild mindestens angezeigt werden, bevor das nächste neue Bild erscheint?",
+                "Wie lange soll ein neu hochgeladenes Bild mindestens angezeigt werden, bevor der Rahmen zu einem anderen Bild wechselt?",
                 "Beispiele: 30m, 1h, 2h, 6h",
-                "0 = deaktiviert (jedes neue Bild wird sofort angezeigt)",
+                "0 = deaktiviert (jedes neue Bild wird sofort angezeigt und folgt der normalen Anzeigedauer)",
                 "(Maximum 24 Stunden)",
             ]
         )
