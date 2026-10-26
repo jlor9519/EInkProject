@@ -26,6 +26,7 @@ from app.display_state import (
     DISPLAY_TRANSITION_KEYS,
     begin_display_transition,
     commit_display_success,
+    record_new_image_display_failure,
 )
 from app.fs_utils import safe_unlink
 from app.models import (
@@ -624,8 +625,10 @@ async def process_queued_upload(application: Application, image_id: str) -> None
                     warnings.append(warning)
                     record = _append_record_warning(record, warning)
                     services.database.upsert_image(record)
-            else:
-                services.database.apply_image_and_settings(record, clear_keys=DISPLAY_TRANSITION_KEYS)
+            elif record_new_image_display_failure(services.database, record, record.last_error or ""):
+                from app.slideshow import schedule_display_retry
+
+                schedule_display_retry(application, record.last_error)
     except Exception as exc:
         if display_state_committed:
             logger.exception("Post-display processing failed for image %s", record.image_id)
@@ -716,6 +719,11 @@ async def _display_rendered_image(
 def _build_success_reply(record: ImageRecord, warnings: list[str]) -> str:
     if record.status == "display_failed":
         return f"Foto gerendert, aber die Anzeige konnte nicht aktualisiert werden: {record.last_error}"
+    if record.status == "rendered":
+        return (
+            f"Das Bild konnte gerade nicht angezeigt werden: {record.last_error}\n"
+            "Es bleibt in der Warteschlange und wird automatisch erneut versucht."
+        )
     lines = ["Das Bild wird jetzt angezeigt."]
     if warnings:
         lines.append("Warnungen:")

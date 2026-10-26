@@ -87,6 +87,7 @@ class ImageRecord:
     status: str
     last_error: str | None = None
     orientation_bucket: str = "shared"
+    display_attempts: int = 0
 
 
 @dataclass(slots=True)

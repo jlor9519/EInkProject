@@ -48,11 +48,14 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
             application = _build_application(services)
             berlin = ZoneInfo("Europe/Berlin")
             now = datetime(2026, 4, 1, 1, 0, tzinfo=berlin)
+            services.database.set_setting("current_image_displayed_at", now.isoformat())
 
             with patch(
                 "app.bot._upload_worker",
                 new=AsyncMock(return_value=None),
-            ), patch("app.slideshow.local_now", return_value=now):
+            ), patch("app.slideshow.local_now", return_value=now), patch(
+                "app.time_utils.local_now", return_value=now
+            ):
                 await _post_init(application)
 
             self.assertEqual(services.display.display_calls, [])

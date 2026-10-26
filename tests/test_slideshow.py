@@ -14,7 +14,14 @@ from app.commands import list_command
 from app.database import Database
 from app.inkypi_adapter import InkyPiAdapter
 from app.models import DisplayConfig, DisplayResult, ImageRecord, InkyPiConfig, StorageConfig
-from app.slideshow import _advance_slideshow, compute_next_fire_decision, project_display_change_offsets
+from app.display_state import MAX_NEW_IMAGE_DISPLAY_ATTEMPTS, record_new_image_display_failure
+from app.slideshow import (
+    STARTUP_GRACE_SECONDS,
+    _advance_slideshow,
+    compute_next_fire_decision,
+    project_display_change_offsets,
+    schedule_slideshow_job,
+)
 
 
 class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
@@ -289,6 +296,149 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(target, datetime.now(timezone.utc))
 
 
+class NextFireTimingTests(unittest.IsolatedAsyncioTestCase):
+    def _mark_new_image_shown(self, services, *, ago: timedelta = timedelta(0)) -> None:
+        shown = (datetime.now(timezone.utc) - ago).isoformat()
+        services.database.set_setting("last_new_image_displayed_at", shown)
+        services.database.set_setting("current_image_displayed_at", shown)
+
+    async def test_new_image_stays_full_interval_when_cooldown_is_shorter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir), interval_seconds=86400)
+            services.database.set_setting("new_image_cooldown", "3600")
+            self._mark_new_image_shown(services)
+
+            decision = compute_next_fire_decision(services)
+
+            self.assertEqual(decision.mode, "interval")
+            self.assertAlmostEqual(decision.seconds, 86400, delta=5)
+
+    async def test_new_image_waits_for_daily_time_after_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir), interval_seconds=86400)
+            services.database.set_setting("new_image_cooldown", "3600")
+            # Daily change is due in 30 minutes, but the new image must stay for the 1h cooldown,
+            # so the change moves to the same time tomorrow instead of firing when the hold ends.
+            daily_time = (datetime.now() + timedelta(minutes=30)).strftime("%H:%M")
+            services.database.set_setting("scheduled_change_time", daily_time)
+            self._mark_new_image_shown(services)
+
+            decision = compute_next_fire_decision(services)
+
+            self.assertEqual(decision.mode, "scheduled_daily")
+            self.assertAlmostEqual(decision.seconds, 24 * 3600 + 30 * 60, delta=120)
+
+    async def test_restart_does_not_reset_display_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir), interval_seconds=86400)
+            shown = datetime.now(timezone.utc) - timedelta(hours=20)
+            services.database.set_setting("current_image_displayed_at", shown.isoformat())
+
+            decision = compute_next_fire_decision(services)
+
+            self.assertEqual(decision.mode, "interval")
+            self.assertAlmostEqual(decision.seconds, 4 * 3600, delta=5)
+
+    async def test_overdue_interval_fires_right_away(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir), interval_seconds=86400)
+            shown = datetime.now(timezone.utc) - timedelta(hours=30)
+            services.database.set_setting("current_image_displayed_at", shown.isoformat())
+
+            decision = compute_next_fire_decision(services)
+
+            self.assertEqual(decision.seconds, 1)
+
+    async def test_restart_interval_counts_from_now(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir), interval_seconds=86400)
+            shown = datetime.now(timezone.utc) - timedelta(hours=20)
+            services.database.set_setting("current_image_displayed_at", shown.isoformat())
+
+            decision = compute_next_fire_decision(services, restart_interval=True)
+
+            self.assertAlmostEqual(decision.seconds, 86400, delta=5)
+
+    async def test_single_image_does_not_refire_immediately_when_overdue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path, interval_seconds=7200)
+            _seed_displayed_images(tmpdir_path, services, ["img-1"])
+            shown = datetime.now(timezone.utc) - timedelta(hours=30)
+            services.database.set_setting("current_image_displayed_at", shown.isoformat())
+            context = _JobContext(services)
+
+            await _advance_slideshow(context)
+
+            self.assertEqual(services.display.display_calls, [])
+            self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "single_image")
+            self.assertAlmostEqual(context.application.job_queue.calls[-1]["first"], 7200, delta=5)
+
+    async def test_startup_waits_grace_period_before_first_fire(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path, interval_seconds=7200)
+            _seed_displayed_images(tmpdir_path, services, ["img-1"])
+            _seed_image(tmpdir_path, services, "new-1", "2026-03-18T13:00:00+00:00", "rendered")
+            application = _JobContext(services).application
+
+            schedule_slideshow_job(application)
+
+            self.assertEqual(application.job_queue.calls[-1]["first"], STARTUP_GRACE_SECONDS)
+
+
+class WaitingQueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_waiting_queue_shows_oldest_upload_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path, interval_seconds=7200)
+            _seed_displayed_images(tmpdir_path, services, ["img-1"])
+            _seed_image(tmpdir_path, services, "new-first", "2026-03-18T13:00:00+00:00", "rendered")
+            _seed_image(tmpdir_path, services, "new-second", "2026-03-18T13:05:00+00:00", "rendered")
+            context = _JobContext(services)
+
+            await _advance_slideshow(context)
+
+            self.assertEqual(services.display.display_calls, ["new-first"])
+            self.assertEqual(services.database.get_image_by_id("new-second").status, "rendered")
+
+    async def test_failed_queued_image_stays_queued_and_is_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path, interval_seconds=7200)
+            _seed_displayed_images(tmpdir_path, services, ["img-1"])
+            _seed_image(tmpdir_path, services, "new-1", "2026-03-18T13:00:00+00:00", "rendered")
+            services.display.fail_next = True
+            context = _JobContext(services)
+
+            await _advance_slideshow(context)
+
+            record = services.database.get_image_by_id("new-1")
+            self.assertEqual(record.status, "rendered")
+            self.assertEqual(record.display_attempts, 1)
+            self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
+
+            await _advance_slideshow(context)
+
+            self.assertEqual(services.display.display_calls, ["new-1"])
+            self.assertEqual(services.database.get_image_by_id("new-1").status, "displayed")
+
+    async def test_new_image_is_given_up_after_max_display_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path, interval_seconds=7200)
+            record = _seed_image(tmpdir_path, services, "new-1", "2026-03-18T13:00:00+00:00", "rendered")
+
+            results = [
+                record_new_image_display_failure(services.database, record, "InkyPi down")
+                for _ in range(MAX_NEW_IMAGE_DISPLAY_ATTEMPTS)
+            ]
+
+            self.assertTrue(all(results[:-1]))
+            self.assertFalse(results[-1])
+            self.assertEqual(services.database.get_image_by_id("new-1").status, "display_failed")
+
+
 class _FakeDisplay:
     def __init__(self, *, payload_path: Path, current_image_path: Path, interval_seconds: int) -> None:
         self.orientation = "horizontal"
@@ -491,6 +641,29 @@ def _seed_displayed_images(base_dir: Path, services, image_ids: list[str]) -> No
         json.dumps({"image_id": image_ids[0]}),
         encoding="utf-8",
     )
+
+
+def _seed_image(base_dir: Path, services, image_id: str, created_at: str, status: str) -> ImageRecord:
+    original = base_dir / "incoming" / f"{image_id}.jpg"
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_bytes(image_id.encode("utf-8"))
+    record = ImageRecord(
+        image_id=image_id,
+        telegram_file_id=f"file-{image_id}",
+        telegram_chat_id=1,
+        local_original_path=str(original),
+        local_rendered_path=None,
+        location="",
+        taken_at="",
+        caption=image_id,
+        uploaded_by=1,
+        created_at=created_at,
+        status=status,
+        last_error=None,
+        orientation_bucket="horizontal",
+    )
+    services.database.upsert_image(record)
+    return record
 
 
 if __name__ == "__main__":

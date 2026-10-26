@@ -182,6 +182,42 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(text, "Das Bild wird jetzt angezeigt.")
             self.assertNotIn("Bild-ID", text)
 
+    async def test_process_queued_upload_keeps_image_queued_when_display_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path, display=_FailingDisplay())
+            application = _FakeApplication(services)
+
+            original = services.storage.original_path("img-1")
+            original.parent.mkdir(parents=True, exist_ok=True)
+            original.write_bytes(b"original")
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=555,
+                    local_original_path=str(original),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="queued",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+
+            await process_queued_upload(application, "img-1")
+
+            record = services.database.get_image_by_id("img-1")
+            self.assertEqual(record.status, "rendered")
+            self.assertEqual(record.display_attempts, 1)
+            self.assertEqual(services.database.count_rendered_images("horizontal"), 1)
+            _, text = application.bot.messages[-1]
+            self.assertIn("automatisch erneut versucht", text)
+
     async def test_process_queued_upload_sends_cooldown_wait_message_without_image_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -493,6 +529,12 @@ class _FakeDisplay:
     def display(self, request) -> DisplayResult:
         self.calls += 1
         return DisplayResult(True, f"displayed {request.image_id}")
+
+
+class _FailingDisplay(_FakeDisplay):
+    def display(self, request) -> DisplayResult:
+        self.calls += 1
+        return DisplayResult(False, "InkyPi update_now request failed: connection refused")
 
 
 class _FakeBot:

@@ -10,10 +10,10 @@ from telegram.ext import Application
 from app.commands import _display_target
 from app.conversations import _cooldown_remaining, _get_cooldown_seconds
 from app.display_state import (
-    DISPLAY_TRANSITION_KEYS,
     begin_display_transition,
     clear_display_transition,
     commit_display_success,
+    record_new_image_display_failure,
 )
 from app.models import DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY
 from app.time_utils import (
@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 JOB_NAME = "slideshow_advance"
 RETRY_DELAY_SECONDS = 60
+# Give InkyPi time to come up after a (nightly) reboot before the first slideshow fire.
+STARTUP_GRACE_SECONDS = 120
 
 
 @dataclass(slots=True)
@@ -64,6 +66,8 @@ def schedule_slideshow_job(application: Application) -> None:
     active_orientation = services.display.current_orientation()
     interval = services.display.get_slideshow_interval()
     decision = compute_next_fire_decision(services, active_orientation)
+    if decision.seconds < STARTUP_GRACE_SECONDS:
+        decision = NextFireDecision(seconds=STARTUP_GRACE_SECONDS, mode=decision.mode, detail=decision.detail)
 
     application.job_queue.run_repeating(
         _advance_slideshow,
@@ -72,19 +76,23 @@ def schedule_slideshow_job(application: Application) -> None:
         name=JOB_NAME,
     )
     _set_next_fire_decision(services, decision)
-    logger.info("Slideshow job scheduled with interval %ds", interval)
+    logger.info("Slideshow job scheduled with interval %ds, first in %ds", interval, decision.seconds)
 
 
 def reschedule_slideshow_job(
     application: Application,
     interval_seconds: int | None = None,
     first_seconds: int | None = None,
+    *,
+    restart_interval: bool = False,
 ) -> None:
     """Remove and re-schedule the slideshow job.
 
     Args:
         interval_seconds: Repeating interval. Default: read from device settings.
-        first_seconds: Delay before first fire. Default: same as interval_seconds.
+        first_seconds: Delay before first fire. Default: computed by compute_next_fire_decision.
+        restart_interval: Count the display interval from now instead of from when the
+            current image was shown (used when the interval itself was just changed).
     """
     if application.job_queue is None:
         return
@@ -96,7 +104,11 @@ def reschedule_slideshow_job(
     if interval_seconds is None:
         interval_seconds = services.display.get_slideshow_interval()
     if first_seconds is None:
-        decision = compute_next_fire_decision(services, services.display.current_orientation())
+        decision = compute_next_fire_decision(
+            services,
+            services.display.current_orientation(),
+            restart_interval=restart_interval,
+        )
     else:
         decision = NextFireDecision(seconds=first_seconds, mode="manual_reset")
 
@@ -113,6 +125,19 @@ def reschedule_slideshow_job(
 def _get_scheduled_time(services) -> str | None:
     """Return the scheduled daily change time as 'HH:MM', or None if disabled."""
     return services.database.get_setting("scheduled_change_time") or None
+
+
+def _get_current_image_displayed_at(services) -> datetime | None:
+    raw = services.database.get_setting("current_image_displayed_at")
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _adjust_candidate_for_quiet_hours(
@@ -171,7 +196,18 @@ def project_display_change_offsets(
     return offsets
 
 
-def compute_next_fire_decision(services, active_orientation: str | None = None) -> NextFireDecision:
+def compute_next_fire_decision(
+    services,
+    active_orientation: str | None = None,
+    *,
+    restart_interval: bool = False,
+) -> NextFireDecision:
+    """Decide when the slideshow should fire next.
+
+    A newly uploaded image stays at least for the new-image cooldown and otherwise follows
+    the normal schedule (daily time or display interval), whichever comes later. The display
+    interval is measured from when the current image was shown, so restarts do not reset it.
+    """
     if active_orientation is None:
         active_orientation = services.display.current_orientation()
 
@@ -192,23 +228,27 @@ def compute_next_fire_decision(services, active_orientation: str | None = None) 
         first = max(1, remaining) if remaining > 0 else 1
         logger.info("Next fire uses rendered queue/cooldown in %ds", first)
         return NextFireDecision(seconds=first, mode="cooldown_queue")
-    if remaining > 0:
-        logger.info("Next fire holds new image for %ds", remaining)
-        return NextFireDecision(seconds=remaining, mode="new_image_hold")
+    hold_until_utc = now_utc + timedelta(seconds=remaining)
 
     scheduled = _get_scheduled_time(services)
     if scheduled:
-        candidate_local = next_local_time_occurrence(scheduled, reference=now_local)
+        candidate_local = next_local_time_occurrence(scheduled, reference=hold_until_utc.astimezone())
         candidate_utc = _adjust_candidate_for_quiet_hours(candidate_local.astimezone(timezone.utc), schedule)
         first = max(1, int((candidate_utc - now_utc).total_seconds()))
         logger.info("Next fire uses scheduled mode in %ds (at %s)", first, scheduled)
         return NextFireDecision(seconds=first, mode="scheduled_daily", detail=scheduled)
 
     interval = services.display.get_slideshow_interval()
-    candidate_utc = now_utc + timedelta(seconds=interval)
+    interval_base = None if restart_interval else _get_current_image_displayed_at(services)
+    interval_due_utc = (interval_base or now_utc) + timedelta(seconds=interval)
+    held = remaining > 0 and hold_until_utc > interval_due_utc
+    candidate_utc = max(hold_until_utc if held else interval_due_utc, now_utc)
     candidate_utc = _adjust_candidate_for_quiet_hours(candidate_utc, schedule)
-    interval_seconds = max(1, int((candidate_utc - now_utc).total_seconds()))
-    return NextFireDecision(seconds=interval_seconds, mode="interval", detail=str(interval))
+    first = max(1, int((candidate_utc - now_utc).total_seconds()))
+    if held:
+        logger.info("Next fire holds new image for %ds", first)
+        return NextFireDecision(seconds=first, mode="new_image_hold")
+    return NextFireDecision(seconds=first, mode="interval", detail=str(interval))
 
 
 def _seconds_until_wake_up(schedule: tuple[str, str]) -> int:
@@ -282,19 +322,18 @@ async def _try_display_next_rendered(context, services) -> bool:
         next_decision = compute_next_fire_decision(services, active_orientation)
         _reschedule_for(context.application, next_decision)
     else:
-        rendered.status = "display_failed"
-        rendered.last_error = result.message
-        services.database.apply_image_and_settings(
-            rendered,
-            clear_keys=DISPLAY_TRANSITION_KEYS,
-        )
-        logger.warning("Failed to display rendered image %s: %s", rendered.image_id, result.message)
-        _reschedule_for(
-            context.application,
-            NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="display_error", detail=result.message),
-        )
+        record_new_image_display_failure(services.database, rendered, result.message)
+        schedule_display_retry(context.application, result.message)
 
     return True
+
+
+def schedule_display_retry(application: Application, detail: str | None = None) -> None:
+    """Fire the slideshow again soon, e.g. to retry a queued image whose display failed."""
+    _reschedule_for(
+        application,
+        NextFireDecision(seconds=RETRY_DELAY_SECONDS, mode="display_error", detail=detail),
+    )
 
 
 def _reschedule_for(application: Application, decision: int | NextFireDecision) -> None:
@@ -382,7 +421,7 @@ async def _advance_slideshow(context) -> None:
         target = services.database.get_adjacent_image(current_image_id, "next", active_orientation)
         if target is None:
             logger.debug("Auto-advance: no next image (only 1 in rotation?)")
-            base_decision = compute_next_fire_decision(services, active_orientation)
+            base_decision = compute_next_fire_decision(services, active_orientation, restart_interval=True)
             _reschedule_for(
                 context.application,
                 NextFireDecision(seconds=base_decision.seconds, mode="single_image", detail=base_decision.detail),

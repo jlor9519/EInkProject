@@ -22,6 +22,9 @@ DISPLAY_TRANSITION_KEYS = (
 )
 CURRENT_IMAGE_VERIFICATION_STATE_KEY = "current_image_verification_state"
 CURRENT_IMAGE_VERIFICATION_DETAIL_KEY = "current_image_verification_detail"
+# A new image whose display fails goes back into the waiting queue. Retries happen about once
+# a minute, so this tolerates roughly half an hour of InkyPi being unavailable before giving up.
+MAX_NEW_IMAGE_DISPLAY_ATTEMPTS = 30
 
 
 def read_current_payload_image_id(payload_path: Path) -> str | None:
@@ -73,3 +76,30 @@ def commit_display_success(
         clear_keys=DISPLAY_TRANSITION_KEYS,
     )
     return timestamp
+
+
+def record_new_image_display_failure(database, record: ImageRecord, message: str) -> bool:
+    """Put a new image back into the waiting queue after a failed display.
+
+    Returns True if the image will be retried, False if it was given up after too many attempts.
+    """
+    record.display_attempts += 1
+    record.last_error = message
+    will_retry = record.display_attempts < MAX_NEW_IMAGE_DISPLAY_ATTEMPTS
+    record.status = "rendered" if will_retry else "display_failed"
+    database.apply_image_and_settings(record, clear_keys=DISPLAY_TRANSITION_KEYS)
+    if will_retry:
+        logger.warning(
+            "Display of new image %s failed (attempt %d); keeping it queued for retry: %s",
+            record.image_id,
+            record.display_attempts,
+            message,
+        )
+    else:
+        logger.error(
+            "Giving up on new image %s after %d failed display attempts: %s",
+            record.image_id,
+            record.display_attempts,
+            message,
+        )
+    return will_retry

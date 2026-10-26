@@ -11,7 +11,12 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Con
 
 from app.auth import require_admin
 from app.commands import _delete_query_message, _display_target, _edit_query_message, get_display_lock, get_services
-from app.display_state import DISPLAY_TRANSITION_KEYS, begin_display_transition, clear_display_transition, commit_display_success
+from app.display_state import (
+    begin_display_transition,
+    clear_display_transition,
+    commit_display_success,
+    record_new_image_display_failure,
+)
 from app.models import DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY
 from app.orientation import format_orientation_label, normalize_orientation_value
 
@@ -529,9 +534,10 @@ async def _switch_orientation_library(context: ContextTypes.DEFAULT_TYPE, orient
         result = await _display_target(services, target)
         if not result.success:
             if was_rendered:
-                target.status = "display_failed"
-                target.last_error = result.message
-                services.database.apply_image_and_settings(target, clear_keys=DISPLAY_TRANSITION_KEYS)
+                record_new_image_display_failure(services.database, target, result.message)
+                from app.slideshow import schedule_display_retry
+
+                schedule_display_retry(context.application, result.message)
             else:
                 clear_display_transition(services.database)
             return False, f"Passendes Bild konnte nicht angezeigt werden: {result.message}"
@@ -998,7 +1004,7 @@ async def _apply_setting_value(
         status = f"{s.label} ist jetzt {label}" if result.success else f"{s.label} wurde als {label} gespeichert"
         from app.slideshow import reschedule_slideshow_job
 
-        reschedule_slideshow_job(context.application, interval_seconds=seconds)
+        reschedule_slideshow_job(context.application, interval_seconds=seconds, restart_interval=True)
         scheduled = services.database.get_setting("scheduled_change_time") or ""
         note = (
             f"\nDer Timer wurde ab jetzt auf {label} zurückgesetzt."

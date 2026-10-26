@@ -64,7 +64,8 @@ class Database:
                     created_at TEXT NOT NULL,
                     status TEXT NOT NULL,
                     last_error TEXT,
-                    orientation_bucket TEXT NOT NULL DEFAULT 'shared'
+                    orientation_bucket TEXT NOT NULL DEFAULT 'shared',
+                    display_attempts INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS settings (
@@ -95,6 +96,10 @@ class Database:
             if "orientation_bucket" not in columns:
                 self._connection.execute(
                     "ALTER TABLE images ADD COLUMN orientation_bucket TEXT NOT NULL DEFAULT 'shared'"
+                )
+            if "display_attempts" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE images ADD COLUMN display_attempts INTEGER NOT NULL DEFAULT 0"
                 )
             self._connection.execute(
                 "UPDATE images SET orientation_bucket = ? WHERE orientation_bucket IS NULL OR orientation_bucket = ''",
@@ -338,6 +343,7 @@ class Database:
             status=row["status"],
             last_error=row["last_error"],
             orientation_bucket=row["orientation_bucket"] or ORIENTATION_SHARED,
+            display_attempts=int(row["display_attempts"] or 0),
         )
 
     def reconcile_runtime_state(
@@ -405,10 +411,11 @@ class Database:
     def get_oldest_rendered_image_for_orientation(self, active_orientation: str | None = None) -> ImageRecord | None:
         """Return the oldest rendered image visible in the active orientation pool."""
         with self._lock:
+            # The pool is ordered newest-first; walk it backwards so the queue is first-in, first-out.
             row = next(
                 (
                     candidate
-                    for candidate in self._get_rotation_pool_rows_locked(active_orientation)
+                    for candidate in reversed(self._get_rotation_pool_rows_locked(active_orientation))
                     if candidate["status"] == "rendered"
                 ),
                 None,
@@ -729,8 +736,9 @@ class Database:
                 created_at,
                 status,
                 last_error,
-                orientation_bucket
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                orientation_bucket,
+                display_attempts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(image_id) DO UPDATE SET
                 telegram_file_id = excluded.telegram_file_id,
                 telegram_chat_id = excluded.telegram_chat_id,
@@ -743,7 +751,8 @@ class Database:
                 created_at = excluded.created_at,
                 status = excluded.status,
                 last_error = excluded.last_error,
-                orientation_bucket = excluded.orientation_bucket
+                orientation_bucket = excluded.orientation_bucket,
+                display_attempts = excluded.display_attempts
             """,
             (
                 record.image_id,
@@ -759,6 +768,7 @@ class Database:
                 record.status,
                 record.last_error,
                 record.orientation_bucket,
+                record.display_attempts,
             ),
         )
 

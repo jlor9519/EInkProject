@@ -15,11 +15,11 @@ from app.auth import require_admin, require_whitelist
 from app.display_state import (
     CURRENT_IMAGE_VERIFICATION_DETAIL_KEY,
     CURRENT_IMAGE_VERIFICATION_STATE_KEY,
-    DISPLAY_TRANSITION_KEYS,
     begin_display_transition,
     clear_display_transition,
     commit_display_success,
     read_current_payload_image_id,
+    record_new_image_display_failure,
 )
 from app.fs_utils import safe_unlink
 from app.models import (
@@ -524,6 +524,8 @@ def _format_timer_mode_label(mode: str | None, detail: str | None, interval_seco
         return f"Modus: täglicher Wechsel um {detail}"
     if mode == "cooldown_queue":
         return "Modus: Warteschlange / Cooldown"
+    if mode == "new_image_hold":
+        return "Modus: neues Bild bleibt bis zum Ende der Wartezeit"
     if mode == "quiet_hours" and detail:
         return f"Modus: Ruhezeit bis {detail}"
     if mode == "retry_busy":
@@ -693,12 +695,7 @@ async def _advance_once_to_next_target(
         )
     else:
         if mark_new_image:
-            target.status = "display_failed"
-            target.last_error = result.message
-            services.database.apply_image_and_settings(
-                target,
-                clear_keys=DISPLAY_TRANSITION_KEYS,
-            )
+            record_new_image_display_failure(services.database, target, result.message)
         else:
             clear_display_transition(services.database)
 
@@ -726,7 +723,7 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
     active_orientation = get_active_orientation(services)
 
     if direction == "next":
-        target, result, _ = await _advance_once_to_next_target(
+        target, result, was_new_image = await _advance_once_to_next_target(
             services,
             current_image_id=None,
             active_orientation=active_orientation,
@@ -745,6 +742,9 @@ async def _navigate_locked(update: Update, context: ContextTypes.DEFAULT_TYPE, d
             if result.success:
                 from app.slideshow import reschedule_slideshow_job
                 reschedule_slideshow_job(context.application)
+            elif was_new_image:
+                from app.slideshow import schedule_display_retry
+                schedule_display_retry(context.application, result.message)
             return
 
     payload_path = services.config.storage.current_payload_path
