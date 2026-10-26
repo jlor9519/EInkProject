@@ -485,6 +485,43 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(services.database.count_displayed_images("horizontal"), 1)
             self.assertIn("Telegram-Benachrichtigung fehlgeschlagen", record.last_error)
 
+    async def test_image_deleted_during_completion_message_stays_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            application = _FakeApplication(services)
+
+            original = services.storage.original_path("img-1")
+            original.parent.mkdir(parents=True, exist_ok=True)
+            original.write_bytes(b"original")
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=555,
+                    local_original_path=str(original),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=1,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="queued",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+
+            async def notify_while_user_deletes(_application, record, _text):
+                # The display lock is already released here, so /delete can remove the image.
+                services.database.delete_image(record.image_id)
+                return record
+
+            with patch("app.conversations._notify_completion", side_effect=notify_while_user_deletes):
+                await process_queued_upload(application, "img-1")
+
+            self.assertIsNone(services.database.get_image_by_id("img-1"))
+
     async def test_process_queued_upload_waits_for_display_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)

@@ -133,8 +133,11 @@ def build_application(services: AppServices) -> Application:
     application.post_shutdown = _post_shutdown
     application.add_error_handler(_application_error_handler)
 
-    application.add_handler(build_photo_conversation())
+    # Settings first: if it is opened during an upload, typed values must reach the settings menu.
+    # When settings is not open it only reacts to /settings and its open button, so uploads are
+    # unaffected.
     application.add_handler(build_settings_conversation())
+    application.add_handler(build_photo_conversation())
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("myid", myid_command))

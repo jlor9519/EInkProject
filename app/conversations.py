@@ -619,7 +619,7 @@ async def process_queued_upload(application: Application, image_id: str) -> None
         if record.status == "failed":
             services.database.upsert_image(record)
             record = await _notify_completion(application, record, f"Verarbeitung fehlgeschlagen: {record.last_error}")
-            services.database.upsert_image(record)
+            services.database.update_image_status(record.image_id, record.status, record.last_error)
             return
 
         # Acquire lock before cooldown check to prevent two simultaneous uploads
@@ -639,7 +639,7 @@ async def process_queued_upload(application: Application, image_id: str) -> None
                     f"Das Bild wartet in der Warteschlange, bis der Rahmen wieder im "
                     f"{format_orientation_label(record.orientation_bucket)} ist.",
                 )
-                services.database.upsert_image(record)
+                services.database.update_image_status(record.image_id, record.status, record.last_error)
                 return
 
             from app.slideshow import _is_in_sleep_window, reschedule_slideshow_job
@@ -657,7 +657,7 @@ async def process_queued_upload(application: Application, image_id: str) -> None
                     f"Es ist gerade Ruhezeit. Das Bild wird nach der Ruhezeit um {schedule[1]} Uhr "
                     f"angezeigt{position_note}.",
                 )
-                services.database.upsert_image(record)
+                services.database.update_image_status(record.image_id, record.status, record.last_error)
                 reschedule_slideshow_job(application)
                 return
 
@@ -675,7 +675,7 @@ async def process_queued_upload(application: Application, image_id: str) -> None
                     f"Das Bild befindet sich in der Warteschlange (Position {pending_count}) "
                     f"und wird voraussichtlich in ca. {eta_label} angezeigt.",
                 )
-                services.database.upsert_image(record)
+                services.database.update_image_status(record.image_id, record.status, record.last_error)
 
                 # Reschedule slideshow to fire when cooldown expires
                 reschedule_slideshow_job(application, first_seconds=remaining)
@@ -718,9 +718,10 @@ async def process_queued_upload(application: Application, image_id: str) -> None
             warning = f"Nachbearbeitung fehlgeschlagen: {exc}"
             warnings.append(warning)
             record = _append_record_warning(record, warning)
-            services.database.upsert_image(record)
+            # The display lock is released here; never re-create an image deleted meanwhile.
+            services.database.update_image_status(record.image_id, record.status, record.last_error)
             record = await _notify_completion(application, record, _build_success_reply(record, warnings))
-            services.database.upsert_image(record)
+            services.database.update_image_status(record.image_id, record.status, record.last_error)
             return
         logger.exception("Processing failed for image %s", record.image_id)
         record.status = "failed"
@@ -728,11 +729,11 @@ async def process_queued_upload(application: Application, image_id: str) -> None
         record.local_rendered_path = str(rendered_path) if rendered_path.exists() else None
         services.database.apply_image_and_settings(record, clear_keys=DISPLAY_TRANSITION_KEYS)
         record = await _notify_completion(application, record, f"Verarbeitung fehlgeschlagen: {exc}")
-        services.database.upsert_image(record)
+        services.database.update_image_status(record.image_id, record.status, record.last_error)
         return
 
     record = await _notify_completion(application, record, _build_success_reply(record, warnings))
-    services.database.upsert_image(record)
+    services.database.update_image_status(record.image_id, record.status, record.last_error)
 
 
 async def _render_image(

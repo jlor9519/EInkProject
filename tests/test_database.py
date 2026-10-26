@@ -47,6 +47,37 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(stored.status, "displayed")
 
 
+    def test_update_image_status_does_not_recreate_deleted_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database = Database(Path(tmpdir) / "frame.db")
+            database.initialize()
+            database.upsert_image(
+                ImageRecord(
+                    image_id="img-1",
+                    telegram_file_id="file-1",
+                    telegram_chat_id=111,
+                    local_original_path="/tmp/original.jpg",
+                    local_rendered_path="/tmp/rendered.png",
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=111,
+                    created_at="2026-03-18T12:00:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                )
+            )
+
+            self.assertTrue(database.update_image_status("img-1", "displayed_with_warnings", "warning"))
+            stored = database.get_image_by_id("img-1")
+            assert stored is not None
+            self.assertEqual((stored.status, stored.last_error), ("displayed_with_warnings", "warning"))
+            self.assertEqual(stored.local_rendered_path, "/tmp/rendered.png")
+
+            database.delete_image("img-1")
+            self.assertFalse(database.update_image_status("img-1", "displayed", None))
+            self.assertIsNone(database.get_image_by_id("img-1"))
+
     def test_concurrent_upsert_image(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             database = Database(Path(tmpdir) / "frame.db")

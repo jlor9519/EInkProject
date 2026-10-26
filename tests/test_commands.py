@@ -1596,6 +1596,7 @@ def _build_services(base_dir: Path, *, is_admin: bool = False):
         storage=SimpleNamespace(
             rendered_path=lambda image_id: base_dir / "rendered" / f"{image_id}.png",
             healthcheck=lambda: True,
+            cleanup_rendered_cache=lambda: None,
         ),
         renderer=SimpleNamespace(render=lambda *args, **kwargs: None),
         config=SimpleNamespace(
@@ -1678,6 +1679,7 @@ def _build_services_with_real_adapter(base_dir: Path, *, refresh_command: str = 
         storage=SimpleNamespace(
             rendered_path=lambda image_id: base_dir / "rendered" / f"{image_id}.png",
             healthcheck=lambda: True,
+            cleanup_rendered_cache=lambda: None,
         ),
         renderer=_CopyingRenderer(),
         config=SimpleNamespace(storage=storage_config),

@@ -26,6 +26,22 @@ _METADATA_LINE_GAP = 2
 _BLUR_RADIUS = 18
 
 
+def _open_prepared(path: Path, max_side: int) -> Image.Image:
+    """Open an image upright, in RGB, and no larger than max_side on its longest edge.
+
+    The draft call lets JPEGs decode at a reduced scale, so a large photo never has to be held
+    in memory at full resolution (the Pi Zero 2 W only has 512 MB).
+    """
+    with Image.open(path) as image:
+        longest = max(image.size)
+        if longest > max_side:
+            scale = max_side / longest
+            image.draft("RGB", (max(1, round(image.width * scale)), max(1, round(image.height * scale))))
+        prepared = ImageOps.exif_transpose(image).convert("RGB")
+    prepared.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+    return prepared
+
+
 class RenderService:
     def __init__(self, config: DisplayConfig):
         self.config = config
@@ -40,17 +56,18 @@ class RenderService:
         caption: str,
     ) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with Image.open(original_path) as original:
-            prepared = ImageOps.exif_transpose(original).convert("RGB")
-            prepared.save(output_path, format="PNG")
+        # Twice the panel size is plenty for cropping/fitting and keeps the PNG a few MB.
+        prepared = _open_prepared(original_path, self._max_prepared_side())
+        prepared.save(output_path, format="PNG")
         return output_path
+
+    def _max_prepared_side(self) -> int:
+        return 2 * max(self.config.width, self.config.height)
 
     @staticmethod
     def thumbnail_jpeg(image_path: Path, max_side: int = 1280) -> BytesIO:
         """Small JPEG copy of an image, well below Telegram's 10 MB photo limit."""
-        with Image.open(image_path) as image:
-            prepared = ImageOps.exif_transpose(image).convert("RGB")
-        prepared.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        prepared = _open_prepared(image_path, max_side)
         buf = BytesIO()
         prepared.save(buf, format="JPEG", quality=85)
         buf.seek(0)
@@ -75,8 +92,7 @@ class RenderService:
         photo_height = max(1, height - caption_bar_height)
         margin = self.config.margin
 
-        with Image.open(original_path) as original:
-            prepared = ImageOps.exif_transpose(original).convert("RGB")
+        prepared = _open_prepared(original_path, self._max_prepared_side())
 
         bg_color = ImageColor.getrgb(_CAPTION_BG)
         final = Image.new("RGB", (width, height), bg_color)

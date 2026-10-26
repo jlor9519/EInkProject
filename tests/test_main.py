@@ -86,6 +86,7 @@ class MainTests(unittest.TestCase):
                 storage=SimpleNamespace(
                     rendered_path=lambda image_id: Path(f"/tmp/{image_id}.png"),
                     healthcheck=lambda: True,
+                    cleanup_rendered_cache=lambda: None,
                 ),
                 renderer=SimpleNamespace(render=lambda *args, **kwargs: None),
             )
@@ -113,6 +114,9 @@ class MainTests(unittest.TestCase):
             self.assertFalse(callback_blocking[r"^del\|y\|"])
             self.assertFalse(callback_blocking[r"^cmd\|"])
             settings = next(h for h in handlers if isinstance(h, ConversationHandler) and h.name == "settings")
+            # Settings must come first so values typed into it during an upload reach it.
+            conversation_names = [h.name for h in handlers if isinstance(h, ConversationHandler)]
+            self.assertEqual(conversation_names, ["settings", "photo_upload"])
             # PTB keeps ConversationHandler.block at True and applies this value to the inner handlers.
             self.assertIs(settings._block, False)
             database.close()

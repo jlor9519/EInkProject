@@ -255,6 +255,17 @@ class Database:
                 )
             self._connection.commit()
 
+    def update_image_status(self, image_id: str, status: str, last_error: str | None) -> bool:
+        """Update status and error of an existing image. Unlike upsert_image, never re-creates
+        a row that was deleted in the meantime. Returns True if the image still exists."""
+        with self._lock:
+            cursor = self._connection.execute(
+                "UPDATE images SET status = ?, last_error = ? WHERE image_id = ?",
+                (status, last_error, image_id),
+            )
+            self._connection.commit()
+            return cursor.rowcount > 0
+
     def delete_image(self, image_id: str) -> bool:
         with self._lock:
             cursor = self._connection.execute(

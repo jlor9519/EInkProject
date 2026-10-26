@@ -642,6 +642,8 @@ async def _display_target(services: AppServices, target: ImageRecord) -> Display
             )
             target.local_rendered_path = str(rendered_path)
             services.database.upsert_image(target)
+            # Keep the rendered cache bounded; otherwise re-renders here pile up between uploads.
+            services.storage.cleanup_rendered_cache()
 
         show_caption = bool(target.caption or target.location or target.taken_at)
         fit_mode = services.database.get_setting("image_fit_mode") or "fill"
