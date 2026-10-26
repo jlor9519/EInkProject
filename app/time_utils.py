@@ -13,7 +13,21 @@ def local_today_iso() -> str:
 
 def _parse_local_time(time_str: str) -> dt_time:
     hour_str, minute_str = time_str.split(":")
-    return dt_time(int(hour_str), int(minute_str))
+    hour, minute = int(hour_str), int(minute_str)
+    if hour == 24 and minute == 0:
+        # "24:00" (end of day, as used by InkyPi playlists) is the same wall-clock time as 00:00.
+        return dt_time(0, 0)
+    return dt_time(hour, minute)
+
+
+def _naive_local(moment: datetime) -> datetime:
+    """Local wall-clock time without a fixed UTC offset.
+
+    Wall-clock arithmetic (replace hour, add days) must happen on naive local datetimes and be
+    converted back with .astimezone(), so the UTC offset of the *resulting* date is used. Doing
+    it on an aware datetime keeps the old offset and is off by an hour across a DST switch.
+    """
+    return moment.astimezone().replace(tzinfo=None)
 
 
 def next_local_time_occurrence(
@@ -22,7 +36,7 @@ def next_local_time_occurrence(
     *,
     reference: datetime | None = None,
 ) -> datetime:
-    now = (reference or local_now()).astimezone()
+    now = _naive_local(reference or local_now())
     target_time = _parse_local_time(time_str)
     target = now.replace(
         hour=target_time.hour,
@@ -34,7 +48,7 @@ def next_local_time_occurrence(
         target += timedelta(days=1)
     if occurrence_index > 0:
         target += timedelta(days=occurrence_index)
-    return target
+    return target.astimezone()
 
 
 def seconds_until_local_time(time_str: str, occurrence_index: int = 0) -> int:
@@ -52,7 +66,7 @@ def _window_bounds_containing(
     start_str: str,
     end_str: str,
 ) -> tuple[datetime, datetime] | None:
-    local_moment = moment.astimezone()
+    local_moment = _naive_local(moment)
     start = _parse_local_time(start_str)
     end = _parse_local_time(end_str)
 
@@ -60,7 +74,7 @@ def _window_bounds_containing(
         window_start = local_moment.replace(hour=start.hour, minute=start.minute, second=0, microsecond=0)
         window_end = local_moment.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
         if window_start <= local_moment < window_end:
-            return window_start, window_end
+            return window_start.astimezone(), window_end.astimezone()
         return None
 
     today_start = local_moment.replace(hour=start.hour, minute=start.minute, second=0, microsecond=0)
@@ -73,7 +87,7 @@ def _window_bounds_containing(
         window_end = today_end + timedelta(days=1)
 
     if window_start <= local_moment < window_end:
-        return window_start, window_end
+        return window_start.astimezone(), window_end.astimezone()
     return None
 
 

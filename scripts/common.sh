@@ -550,6 +550,24 @@ PY
 }
 
 
+# Start the bot after InkyPi on boot (ordering only, no hard dependency). Installed as a drop-in so an
+# existing photo-frame.service unit is not overwritten on update.
+ensure_service_ordering() {
+  local dropin_dir="/etc/systemd/system/photo-frame.service.d"
+  local content=$'# Managed by EInkProject installer\n[Unit]\nAfter=inkypi.service'
+  if [[ "${MOCK_INSTALL}" == "1" ]]; then
+    dropin_dir="${MOCK_STATE_DIR}/systemd/photo-frame.service.d"
+    mkdir -p "${dropin_dir}"
+    printf '%s\n' "${content}" > "${dropin_dir}/after-inkypi.conf"
+    echo "[mock] Wrote systemd drop-in to ${dropin_dir}/after-inkypi.conf"
+    return 0
+  fi
+  run_privileged mkdir -p "${dropin_dir}"
+  printf '%s\n' "${content}" | sudo tee "${dropin_dir}/after-inkypi.conf" >/dev/null
+  run_privileged systemctl daemon-reload
+}
+
+
 ensure_service_unit() {
   local service_user="$1"
   local install_dir="$2"
@@ -573,7 +591,7 @@ command = "cd {cwd} && exec {python_bin} -m app.main --config {config_path}".for
 )
 print(f"""[Unit]
 Description=Telegram to InkyPi Photo Frame
-After=network-online.target
+After=network-online.target inkypi.service
 Wants=network-online.target
 
 [Service]

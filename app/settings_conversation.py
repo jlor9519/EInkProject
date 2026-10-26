@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -505,6 +506,15 @@ async def _show_image_tuning_prompt(
     return WAITING_FOR_SETTINGS_VALUE
 
 
+async def _run_device_change(context: ContextTypes.DEFAULT_TYPE, func, *args, **kwargs):
+    """Run a blocking InkyPi settings change (restart + refresh) off the event loop.
+
+    Holds the display lock so it cannot restart InkyPi in the middle of another display update.
+    """
+    async with get_display_lock(context):
+        return await asyncio.to_thread(func, *args, **kwargs)
+
+
 def _next_fire_delay_for_orientation(services, active_orientation: str) -> int | None:
     rendered_count = services.database.count_rendered_images(active_orientation)
     if rendered_count <= 0:
@@ -792,7 +802,12 @@ async def _save_image_tuning(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await _show_settings_menu(update, context, notice="Bildoptimierung unverändert.")
 
     try:
-        result = services.display.apply_device_settings({"image_settings": changed_updates}, refresh_current=True)
+        result = await _run_device_change(
+            context,
+            services.display.apply_device_settings,
+            {"image_settings": changed_updates},
+            refresh_current=True,
+        )
     except Exception as exc:
         logger.exception("Failed to write grouped image settings")
         return await _show_image_tuning_menu(
@@ -863,7 +878,12 @@ async def _apply_setting_value(
             "inverted_image": orientation == "vertical",
         }
         try:
-            result = services.display.apply_device_settings(updates, refresh_current=False)
+            result = await _run_device_change(
+                context,
+                services.display.apply_device_settings,
+                updates,
+                refresh_current=False,
+            )
         except Exception as exc:
             logger.exception("Failed to write orientation settings")
             await _respond_settings_message(update, f"Fehler beim Speichern der Einstellungen: {exc}")
@@ -933,7 +953,7 @@ async def _apply_setting_value(
     if s.kind == "sleep_schedule":
         if text in ("keine", "kein", "no", "off", "deaktivieren", "deaktiviert"):
             try:
-                result = services.display.set_sleep_schedule(None, None)
+                result = await _run_device_change(context, services.display.set_sleep_schedule, None, None)
             except Exception as exc:
                 logger.exception("Failed to disable sleep schedule")
                 await _respond_settings_message(update, f"Fehler beim Speichern: {exc}")
@@ -967,7 +987,7 @@ async def _apply_setting_value(
                 notice="Schlaf- und Aufwachzeit dürfen nicht gleich sein. Bitte erneut eingeben oder den Button „Abbrechen“ nutzen.",
             )
         try:
-            result = services.display.set_sleep_schedule(sleep_start, wake_up)
+            result = await _run_device_change(context, services.display.set_sleep_schedule, sleep_start, wake_up)
         except Exception as exc:
             logger.exception("Failed to set sleep schedule")
             await _respond_settings_message(update, f"Fehler beim Speichern: {exc}")
@@ -995,7 +1015,7 @@ async def _apply_setting_value(
                 notice="Der Wert muss zwischen 5 Minuten und 7 Tagen liegen. Bitte erneut eingeben oder den Button „Abbrechen“ nutzen.",
             )
         try:
-            result = services.display.set_slideshow_interval(seconds)
+            result = await _run_device_change(context, services.display.set_slideshow_interval, seconds)
         except Exception as exc:
             logger.exception("Failed to set slideshow interval")
             await _respond_settings_message(update, f"Fehler beim Speichern: {exc}")

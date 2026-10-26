@@ -66,6 +66,7 @@ if [[ "${clear_images}" == "1" ]]; then
 fi
 
 if systemd_unit_exists 'photo-frame.service'; then
+  ensure_service_ordering
   echo "Restarting photo-frame.service."
   run_privileged systemctl restart photo-frame.service
   ensure_systemd_service_active photo-frame.service

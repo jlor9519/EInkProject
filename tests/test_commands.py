@@ -219,6 +219,35 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
                 ["Aktuelles Bild konnte nicht ersetzt werden. Anzeige fehlgeschlagen: Bilddatei für img-2 nicht mehr vorhanden."],
             )
 
+    async def test_delete_buttons_reject_users_who_are_no_longer_whitelisted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            _seed_current_and_other_image(Path(tmpdir), services)
+            services.auth.is_whitelisted = lambda user_id: False
+            update = _FakeUpdate(data="del|y|img-2", has_media=False)
+
+            await _delete_confirm_callback(update, _FakeContext(services))
+
+            self.assertIsNotNone(services.database.get_image_by_id("img-2"))
+            self.assertIn("nicht freigegeben", update.callback_query.text_edits[-1])
+
+    async def test_delete_of_other_image_waits_for_running_display_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            _seed_current_and_other_image(Path(tmpdir), services)
+            update = _FakeUpdate(data="del|y|img-2", has_media=False)
+            context = _FakeContext(services)
+
+            async with context.application.bot_data["display_lock"]:
+                await _delete_confirm_callback(update, context)
+
+            self.assertIsNotNone(services.database.get_image_by_id("img-2"))
+            self.assertEqual(update.callback_query.text_edits, ["Eine Aktualisierung läuft bereits. Bitte warten."])
+
+            await _delete_confirm_callback(_FakeUpdate(data="del|y|img-2", has_media=False), context)
+
+            self.assertIsNone(services.database.get_image_by_id("img-2"))
+
     async def test_list_command_uses_upload_timestamp_for_images_without_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -416,9 +445,9 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("Bibliothek: Hochformat", update_status.effective_message.replies[0])
             self.assertIn("In Rotation: 3 Bilder", update_status.effective_message.replies[0])
-            self.assertIn("Neue Bilder in Warteliste: 0", update_status.effective_message.replies[0])
+            self.assertIn("Ältere Bilder außerhalb der Rotation: 0", update_status.effective_message.replies[0])
             self.assertIn("Warteschlange: 1 neues Bild wartend", update_status.effective_message.replies[0])
-            self.assertIn("Neue Bilder in Warteliste: 0", update_list.effective_message.replies[0])
+            self.assertIn("Ältere Bilder außerhalb der Rotation: 0", update_list.effective_message.replies[0])
             self.assertIn("Bilderliste Hochformat (2 gesamt)", update_list.effective_message.replies[0])
             self.assertIn("Horizontal", update_list.effective_message.replies[0])
             self.assertIn("nicht Teil der aktuellen Bibliothek", update_list.effective_message.replies[0])
@@ -461,10 +490,10 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             await list_command(update_list, context)
 
             self.assertIn("In Rotation: 2 Bilder", update_status.effective_message.replies[0])
-            self.assertIn("Neue Bilder in Warteliste: 1", update_status.effective_message.replies[0])
+            self.assertIn("Ältere Bilder außerhalb der Rotation: 1", update_status.effective_message.replies[0])
             self.assertIn("img-old", update_list.effective_message.replies[0])
             self.assertIn("nicht Teil der aktuellen Bibliothek", update_list.effective_message.replies[0])
-            self.assertIn("Neue Bilder in Warteliste: 1", update_list.effective_message.replies[0])
+            self.assertIn("Ältere Bilder außerhalb der Rotation: 1", update_list.effective_message.replies[0])
             self.assertIn('"img-mid"', update_list.effective_message.replies[0])
             self.assertIn('"img-new"', update_list.effective_message.replies[0])
 
@@ -506,8 +535,8 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             await list_command(update_list, context)
 
             self.assertIn("In Rotation: 3 Bilder", update_status.effective_message.replies[0])
-            self.assertIn("Neue Bilder in Warteliste: 0", update_status.effective_message.replies[0])
-            self.assertIn("Neue Bilder in Warteliste: 0", update_list.effective_message.replies[0])
+            self.assertIn("Ältere Bilder außerhalb der Rotation: 0", update_status.effective_message.replies[0])
+            self.assertIn("Ältere Bilder außerhalb der Rotation: 0", update_list.effective_message.replies[0])
 
     async def test_list_self_heals_stale_interval_timer_and_shows_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1529,6 +1558,28 @@ def _build_services(base_dir: Path, *, is_admin: bool = False):
         ),
     )
 
+
+
+def _seed_current_and_other_image(base_dir: Path, services) -> None:
+    services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+    services.config.storage.current_payload_path.write_text(json.dumps({"image_id": "img-1"}), encoding="utf-8")
+    for index, image_id in enumerate(("img-1", "img-2")):
+        services.database.upsert_image(
+            ImageRecord(
+                image_id=image_id,
+                telegram_file_id=f"file-{image_id}",
+                telegram_chat_id=111,
+                local_original_path=str(base_dir / "incoming" / f"{image_id}.jpg"),
+                local_rendered_path=None,
+                location="",
+                taken_at="",
+                caption="",
+                uploaded_by=1,
+                created_at=f"2026-03-18T12:{index:02d}:00+00:00",
+                status="displayed",
+                last_error=None,
+            )
+        )
 
 class _CopyingRenderer:
     def render(self, original_path: Path, output_path: Path, **_: object) -> Path:

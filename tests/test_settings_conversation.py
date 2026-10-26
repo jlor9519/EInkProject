@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -371,6 +372,26 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("zwischen 1 und 1000", update.effective_message.replies[0])
         self.assertNotIn("/cancel", update.effective_message.replies[0])
 
+
+    async def test_device_changes_run_off_event_loop_under_display_lock(self) -> None:
+        for idx, text, expected_call in (
+            (3, "2h", "set_slideshow_interval"),
+            (4, "22:00-07:00", "set_sleep_schedule"),
+            (4, "keine", "set_sleep_schedule"),
+            (1, "horizontal", "apply_device_settings"),
+        ):
+            with self.subTest(text=text):
+                services = _FakeServices(is_admin=True)
+                context = _FakeContext(services, with_job_queue=True)
+                services.display.lock = context.application.bot_data["display_lock"]
+                context.user_data[PENDING_SETTINGS_KEY] = idx
+
+                with patch("app.settings_conversation._switch_orientation_library", return_value=(True, "ok")):
+                    await receive_settings_value(_FakeUpdate(text, user_id=11), context)
+
+                self.assertEqual(services.display.change_calls, [(expected_call, True, True)])
+                self.assertFalse(context.application.bot_data["display_lock"].locked())
+
     async def test_receive_settings_value_applies_orientation_and_inverted_image(self) -> None:
         services = _FakeServices(is_admin=True)
         services.display.apply_result = DeviceSettingsApplyResult(
@@ -495,6 +516,40 @@ class OrientationSwitchTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Es gibt noch keine Bilder für Querformat.", update.effective_message.replies[0])
 
 
+    async def test_orientation_setting_switches_library_without_deadlock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _RealishServices(tmpdir_path)
+            original = tmpdir_path / "incoming" / "img-h.jpg"
+            original.parent.mkdir(parents=True, exist_ok=True)
+            original.write_bytes(b"original")
+            services.database.upsert_image(
+                ImageRecord(
+                    image_id="img-h",
+                    telegram_file_id="file-h",
+                    telegram_chat_id=11,
+                    local_original_path=str(original),
+                    local_rendered_path=None,
+                    location="",
+                    taken_at="",
+                    caption="",
+                    uploaded_by=11,
+                    created_at="2026-03-18T12:20:00+00:00",
+                    status="displayed",
+                    last_error=None,
+                    orientation_bucket="horizontal",
+                )
+            )
+            context = _RealishContext(services)
+            context.user_data[PENDING_SETTINGS_KEY] = 1
+
+            await asyncio.wait_for(
+                receive_settings_value(_FakeUpdate("horizontal", user_id=11), context),
+                timeout=5,
+            )
+
+            self.assertEqual(services.display.display_calls, ["img-h"])
+
 class _FakeAuth:
     def __init__(self, *, is_admin: bool):
         self._is_admin = is_admin
@@ -530,6 +585,13 @@ class _FakeDisplay:
         self.last_updates: dict[str, object] | None = None
         self.last_refresh_current: bool | None = None
         self.interval_seconds = 86400
+        self.lock: asyncio.Lock | None = None
+        self.change_calls: list[tuple[str, bool, bool]] = []
+
+    def _record_change(self, name: str) -> None:
+        locked = self.lock is not None and self.lock.locked()
+        off_loop = threading.current_thread() is not threading.main_thread()
+        self.change_calls.append((name, locked, off_loop))
 
     def read_device_settings(self) -> dict[str, object]:
         return self.settings
@@ -549,6 +611,7 @@ class _FakeDisplay:
         *,
         refresh_current: bool = True,
     ) -> DeviceSettingsApplyResult:
+        self._record_change("apply_device_settings")
         self.last_updates = updates
         self.last_refresh_current = refresh_current
         merged_settings = {
@@ -570,6 +633,7 @@ class _FakeDisplay:
         return self.apply_result
 
     def set_slideshow_interval(self, seconds: int) -> DeviceSettingsApplyResult:
+        self._record_change("set_slideshow_interval")
         self.interval_seconds = seconds
         return DeviceSettingsApplyResult(
             success=True,
@@ -579,6 +643,7 @@ class _FakeDisplay:
         )
 
     def set_sleep_schedule(self, start: str | None, end: str | None) -> DeviceSettingsApplyResult:
+        self._record_change("set_sleep_schedule")
         return DeviceSettingsApplyResult(
             success=True,
             message="ok",

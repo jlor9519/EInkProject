@@ -8,6 +8,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from PIL import Image
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TimedOut
 from telegram.ext import (
@@ -51,10 +52,71 @@ UPLOAD_QUEUE_KEY = "upload_queue"
 def _discard_pending_submission(context: ContextTypes.DEFAULT_TYPE) -> None:
     pending = context.user_data.get(PENDING_SUBMISSION_KEY)
     if isinstance(pending, dict):
-        original_path = pending.get("original_path")
-        if original_path:
-            safe_unlink(original_path, logger=logger)
+        for photo in _pending_photos(pending):
+            safe_unlink(photo.get("original_path"), logger=logger)
     context.user_data.pop(PENDING_SUBMISSION_KEY, None)
+
+
+def _pending_photos(pending: dict[str, Any]) -> list[dict[str, Any]]:
+    """All photos of a pending submission: the first one plus any further album photos."""
+    return [pending, *pending.get("extra_photos", [])]
+
+
+_ALREADY_PENDING_TEXT = (
+    "Du hast bereits einen Upload in Bearbeitung. Beantworte die Fragen oder nutze den Button „Abbrechen“."
+)
+_UNSUPPORTED_IMAGE_TEXT = "Dieses Bildformat wird nicht unterstützt. Bitte sende das Bild als normales Foto."
+_IMAGE_MESSAGE_FILTER = (filters.PHOTO | filters.Document.IMAGE) & ~filters.COMMAND
+
+
+def _image_attachment(message) -> Any | None:
+    """Return the photo or image file attached to a message, or None."""
+    if message.photo:
+        return message.photo[-1]
+    document = getattr(message, "document", None)
+    if document is not None and str(getattr(document, "mime_type", "") or "").startswith("image/"):
+        return document
+    return None
+
+
+def _is_readable_image(path: Path) -> bool:
+    try:
+        with Image.open(path) as image:
+            image.verify()
+    except Exception:
+        return False
+    return True
+
+
+async def _download_image(services, message, user_id: int) -> tuple[dict[str, Any] | None, str | None]:
+    """Download the image of a message into the incoming folder.
+
+    Returns the photo info for the pending submission, or None and a reply text on failure.
+    """
+    attachment = _image_attachment(message)
+    if attachment is None:
+        return None, _UNSUPPORTED_IMAGE_TEXT
+    image_id = services.storage.generate_image_id()
+    original_path = services.storage.original_path(image_id)
+    try:
+        logger.info("Downloading photo %s from user %d", image_id, user_id)
+        telegram_file = await attachment.get_file()
+        await telegram_file.download_to_drive(custom_path=str(original_path))
+    except Exception as exc:  # pragma: no cover - depends on Telegram runtime
+        logger.exception("Failed to download photo %s from Telegram", image_id)
+        return None, f"Fehler beim Herunterladen des Fotos von Telegram: {exc}"
+
+    # Photos are always JPEGs re-encoded by Telegram; files sent as documents can be any format (e.g. HEIC).
+    if not message.photo and not await asyncio.to_thread(_is_readable_image, original_path):
+        logger.warning("Rejected unsupported image file %s", image_id)
+        safe_unlink(original_path, logger=logger)
+        return None, _UNSUPPORTED_IMAGE_TEXT
+
+    return {
+        "image_id": image_id,
+        "telegram_file_id": attachment.file_id,
+        "original_path": str(original_path),
+    }, None
 
 
 def _location_keyboard() -> InlineKeyboardMarkup:
@@ -106,32 +168,25 @@ async def photo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     services = get_services(context)
     user = update.effective_user
     message = update.effective_message
-    if user is None or message is None or not message.photo:
+    if user is None or message is None or _image_attachment(message) is None:
         return ConversationHandler.END
 
     if context.user_data.get(PENDING_SUBMISSION_KEY):
-        await message.reply_text("Du hast bereits einen Upload in Bearbeitung. Beantworte die Fragen oder nutze den Button „Abbrechen“.")
+        await message.reply_text(_ALREADY_PENDING_TEXT)
         return WAITING_FOR_TEXT_CHOICE
 
-    photo = message.photo[-1]
-    image_id = services.storage.generate_image_id()
-    original_path = services.storage.original_path(image_id)
-
-    try:
-        logger.info("Downloading photo %s from user %d", image_id, user.id)
-        telegram_file = await photo.get_file()
-        await telegram_file.download_to_drive(custom_path=str(original_path))
-    except Exception as exc:  # pragma: no cover - depends on Telegram runtime
-        logger.exception("Failed to download photo %s from Telegram", image_id)
-        await message.reply_text(f"Fehler beim Herunterladen des Fotos von Telegram: {exc}")
+    photo_info, error_text = await _download_image(services, message, user.id)
+    if photo_info is None:
+        await message.reply_text(error_text)
         return ConversationHandler.END
 
     context.user_data[PENDING_SUBMISSION_KEY] = {
-        "image_id": image_id,
-        "telegram_file_id": photo.file_id,
-        "original_path": str(original_path),
+        **photo_info,
         "caption": (message.caption or "").strip(),
         "orientation_bucket": services.display.current_orientation(),
+        # Further photos of the same Telegram album are collected into this submission.
+        "media_group_id": getattr(message, "media_group_id", None),
+        "extra_photos": [],
     }
 
     keyboard = InlineKeyboardMarkup([
@@ -243,6 +298,9 @@ async def _show_preview(message, context: ContextTypes.DEFAULT_TYPE) -> int:
         lines.append(f"Text: {caption}")
     if not any([location, taken_at, caption]):
         lines.append("(Kein Text)")
+    extra_count = len(pending.get("extra_photos", []))
+    if extra_count:
+        lines.append(f"+ {extra_count} weitere{'s' if extra_count == 1 else ''} Bild{'er' if extra_count != 1 else ''} aus dem Album (gleicher Text)")
     preview_text = "\n".join(lines)
 
     keyboard = InlineKeyboardMarkup([
@@ -409,33 +467,38 @@ async def _submit_photo(
     chat = update.effective_chat or getattr(message, "chat", None)
     chat_id = getattr(chat, "id", None)
 
-    record = ImageRecord(
-        image_id=pending["image_id"],
-        telegram_file_id=pending["telegram_file_id"],
-        telegram_chat_id=chat_id,
-        local_original_path=pending["original_path"],
-        local_rendered_path=None,
-        location=location,
-        taken_at=taken_at,
-        caption=caption,
-        uploaded_by=user.id,
-        created_at=utcnow_iso(),
-        status="queued",
-        last_error=None,
-        orientation_bucket=str(pending.get("orientation_bucket") or "shared"),
-    )
-    try:
-        services.database.upsert_image(record)
-        queue = _get_upload_queue(context)
-        await queue.put(record.image_id)
-    except Exception as exc:
-        logger.exception("Failed to enqueue image %s", record.image_id)
-        record.status = "failed"
-        record.last_error = str(exc)
-        services.database.upsert_image(record)
-        await _safe_reply_text(message, f"Verarbeitung fehlgeschlagen: {exc}")
-        context.user_data.pop(PENDING_SUBMISSION_KEY, None)
-        return ConversationHandler.END
+    # Album photos share the same text and are queued in album order (created_at keeps the FIFO order).
+    photos = _pending_photos(pending)
+    for index, photo in enumerate(photos):
+        record = ImageRecord(
+            image_id=photo["image_id"],
+            telegram_file_id=photo["telegram_file_id"],
+            telegram_chat_id=chat_id,
+            local_original_path=photo["original_path"],
+            local_rendered_path=None,
+            location=location,
+            taken_at=taken_at,
+            caption=caption,
+            uploaded_by=user.id,
+            created_at=utcnow_iso(),
+            status="queued",
+            last_error=None,
+            orientation_bucket=str(pending.get("orientation_bucket") or "shared"),
+        )
+        try:
+            services.database.upsert_image(record)
+            queue = _get_upload_queue(context)
+            await queue.put(record.image_id)
+        except Exception as exc:
+            logger.exception("Failed to enqueue image %s", record.image_id)
+            record.status = "failed"
+            record.last_error = str(exc)
+            services.database.upsert_image(record)
+            for unqueued in photos[index + 1:]:
+                safe_unlink(unqueued["original_path"], logger=logger)
+            await _safe_reply_text(message, f"Verarbeitung fehlgeschlagen: {exc}")
+            context.user_data.pop(PENDING_SUBMISSION_KEY, None)
+            return ConversationHandler.END
 
     context.user_data.pop(PENDING_SUBMISSION_KEY, None)
     return ConversationHandler.END
@@ -576,6 +639,25 @@ async def process_queued_upload(application: Application, image_id: str) -> None
                 services.database.upsert_image(record)
                 return
 
+            from app.slideshow import _is_in_sleep_window, reschedule_slideshow_job
+
+            schedule = services.display.get_sleep_schedule()
+            if schedule and _is_in_sleep_window(schedule):
+                # Quiet hours — don't refresh the panel now; the slideshow shows it at wake-up
+                record.status = "rendered"
+                services.database.upsert_image(record)
+                pending_count = services.database.count_rendered_images(active_orientation)
+                position_note = f" (Position {pending_count} in der Warteschlange)" if pending_count > 1 else ""
+                record = await _notify_completion(
+                    application,
+                    record,
+                    f"Es ist gerade Ruhezeit. Das Bild wird nach der Ruhezeit um {schedule[1]} Uhr "
+                    f"angezeigt{position_note}.",
+                )
+                services.database.upsert_image(record)
+                reschedule_slideshow_job(application)
+                return
+
             if remaining > 0:
                 # Cooldown active — park as "rendered" and notify user with ETA
                 record.status = "rendered"
@@ -593,7 +675,6 @@ async def process_queued_upload(application: Application, image_id: str) -> None
                 services.database.upsert_image(record)
 
                 # Reschedule slideshow to fire when cooldown expires
-                from app.slideshow import reschedule_slideshow_job
                 reschedule_slideshow_job(application, first_seconds=remaining)
                 return
 
@@ -616,7 +697,6 @@ async def process_queued_upload(application: Application, image_id: str) -> None
                     verification_detail=verification_detail,
                 )
                 display_state_committed = True
-                from app.slideshow import reschedule_slideshow_job
                 try:
                     reschedule_slideshow_job(application)
                 except Exception as exc:
@@ -740,6 +820,30 @@ def _make_unexpected_handler(state: int):
     return handler
 
 
+def _make_album_photo_handler(state: int):
+    """Collect further photos of the same Telegram album into the pending submission."""
+
+    async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        message = update.effective_message
+        user = update.effective_user
+        pending = context.user_data.get(PENDING_SUBMISSION_KEY)
+        if message is None or user is None or pending is None:
+            return state
+        media_group_id = getattr(message, "media_group_id", None)
+        if media_group_id is None or media_group_id != pending.get("media_group_id"):
+            await message.reply_text(_ALREADY_PENDING_TEXT)
+            return state
+
+        photo_info, error_text = await _download_image(get_services(context), message, user.id)
+        if photo_info is None:
+            await message.reply_text(error_text)
+            return state
+        pending.setdefault("extra_photos", []).append(photo_info)
+        return state
+
+    return handler
+
+
 _unexpected_text_choice = _make_unexpected_handler(WAITING_FOR_TEXT_CHOICE)
 _unexpected_location = _make_unexpected_handler(WAITING_FOR_LOCATION)
 _unexpected_taken_at = _make_unexpected_handler(WAITING_FOR_TAKEN_AT)
@@ -759,31 +863,36 @@ async def _conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TY
 
 def build_photo_conversation() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[MessageHandler(filters.PHOTO & ~filters.COMMAND, photo_entry)],
+        entry_points=[MessageHandler(_IMAGE_MESSAGE_FILTER, photo_entry)],
         fallbacks=[],
         states={
             WAITING_FOR_TEXT_CHOICE: [
                 CallbackQueryHandler(photo_button_callback, pattern=r"^photo_"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text_choice),
+                MessageHandler(_IMAGE_MESSAGE_FILTER, _make_album_photo_handler(WAITING_FOR_TEXT_CHOICE)),
                 MessageHandler(filters.ALL & ~filters.COMMAND, _unexpected_text_choice),
             ],
             WAITING_FOR_LOCATION: [
                 CallbackQueryHandler(photo_button_callback, pattern=r"^photo_"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_location),
+                MessageHandler(_IMAGE_MESSAGE_FILTER, _make_album_photo_handler(WAITING_FOR_LOCATION)),
                 MessageHandler(filters.ALL & ~filters.COMMAND, _unexpected_location),
             ],
             WAITING_FOR_TAKEN_AT: [
                 CallbackQueryHandler(photo_button_callback, pattern=r"^photo_"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_taken_at),
+                MessageHandler(_IMAGE_MESSAGE_FILTER, _make_album_photo_handler(WAITING_FOR_TAKEN_AT)),
                 MessageHandler(filters.ALL & ~filters.COMMAND, _unexpected_taken_at),
             ],
             WAITING_FOR_CAPTION: [
                 CallbackQueryHandler(photo_button_callback, pattern=r"^photo_"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_caption),
+                MessageHandler(_IMAGE_MESSAGE_FILTER, _make_album_photo_handler(WAITING_FOR_CAPTION)),
                 MessageHandler(filters.ALL & ~filters.COMMAND, _unexpected_caption),
             ],
             WAITING_FOR_PREVIEW_CONFIRM: [
                 CallbackQueryHandler(photo_button_callback, pattern=r"^photo_"),
+                MessageHandler(_IMAGE_MESSAGE_FILTER, _make_album_photo_handler(WAITING_FOR_PREVIEW_CONFIRM)),
                 MessageHandler(filters.ALL & ~filters.COMMAND, _unexpected_preview),
             ],
             ConversationHandler.TIMEOUT: [

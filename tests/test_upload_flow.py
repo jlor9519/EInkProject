@@ -6,8 +6,11 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import patch
+
+from PIL import Image
 
 from telegram.error import TimedOut
 from telegram.ext import ConversationHandler
@@ -16,6 +19,8 @@ from app.conversations import (
     PENDING_SUBMISSION_KEY,
     WAITING_FOR_CAPTION,
     WAITING_FOR_TEXT_CHOICE,
+    _discard_pending_submission,
+    _make_album_photo_handler,
     _submit_photo,
     photo_button_callback,
     photo_entry,
@@ -162,6 +167,89 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(queued_one.telegram_chat_id, 101)
             self.assertEqual(queued_two.telegram_chat_id, 202)
 
+    async def test_album_photos_share_text_and_queue_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            application = _FakeApplication(services)
+            context = _FakeContext(application)
+            first = _FakeUpdate(user_id=1, chat_id=101, photo_token="one", media_group_id="album-1")
+            second = _FakeUpdate(user_id=1, chat_id=101, photo_token="two", media_group_id="album-1")
+            album_handler = _make_album_photo_handler(WAITING_FOR_TEXT_CHOICE)
+
+            await photo_entry(first, context)
+            state = await album_handler(second, context)
+
+            self.assertEqual(state, WAITING_FOR_TEXT_CHOICE)
+            self.assertEqual(second.effective_message.replies, [])
+            await _submit_photo(first, context, location="Berlin", taken_at="2026-03-18", caption="Urlaub")
+
+            queue: asyncio.Queue[str] = application.bot_data["upload_queue"]
+            queued_ids = [queue.get_nowait() for _ in range(queue.qsize())]
+            self.assertEqual(len(queued_ids), 2)
+            records = [services.database.get_image_by_id(image_id) for image_id in queued_ids]
+            self.assertEqual([r.telegram_file_id for r in records], ["file-one", "file-two"])
+            self.assertTrue(all((r.location, r.taken_at, r.caption) == ("Berlin", "2026-03-18", "Urlaub") for r in records))
+            self.assertLess(records[0].created_at, records[1].created_at)
+
+    async def test_photo_from_another_album_is_not_mixed_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            context = _FakeContext(_FakeApplication(services))
+            first = _FakeUpdate(user_id=1, chat_id=101, photo_token="one", media_group_id="album-1")
+            other = _FakeUpdate(user_id=1, chat_id=101, photo_token="two")
+
+            await photo_entry(first, context)
+            await _make_album_photo_handler(WAITING_FOR_TEXT_CHOICE)(other, context)
+
+            self.assertEqual(context.user_data[PENDING_SUBMISSION_KEY]["extra_photos"], [])
+            self.assertIn("bereits einen Upload in Bearbeitung", other.effective_message.replies[-1])
+
+    async def test_cancel_deletes_album_photo_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            context = _FakeContext(_FakeApplication(services))
+            first = _FakeUpdate(user_id=1, chat_id=101, photo_token="one", media_group_id="album-1")
+            second = _FakeUpdate(user_id=1, chat_id=101, photo_token="two", media_group_id="album-1")
+            await photo_entry(first, context)
+            await _make_album_photo_handler(WAITING_FOR_TEXT_CHOICE)(second, context)
+            pending = context.user_data[PENDING_SUBMISSION_KEY]
+            paths = [Path(pending["original_path"]), Path(pending["extra_photos"][0]["original_path"])]
+            self.assertTrue(all(path.exists() for path in paths))
+
+            _discard_pending_submission(context)
+
+            self.assertFalse(any(path.exists() for path in paths))
+
+    async def test_image_sent_as_file_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            context = _FakeContext(_FakeApplication(services))
+            buffer = BytesIO()
+            Image.new("RGB", (8, 8), "red").save(buffer, format="PNG")
+            document = _FakeDocument("doc", mime_type="image/png", payload=buffer.getvalue())
+            update = _FakeUpdate(user_id=1, chat_id=101, photo_token=None, document=document)
+
+            result = await photo_entry(update, context)
+
+            self.assertEqual(result, WAITING_FOR_TEXT_CHOICE)
+            self.assertEqual(context.user_data[PENDING_SUBMISSION_KEY]["telegram_file_id"], "file-doc")
+
+    async def test_unreadable_image_file_is_rejected_and_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            context = _FakeContext(_FakeApplication(services))
+            document = _FakeDocument("heic", mime_type="image/heic", payload=b"not decodable by pillow")
+            update = _FakeUpdate(user_id=1, chat_id=101, photo_token=None, document=document)
+
+            result = await photo_entry(update, context)
+
+            self.assertEqual(result, ConversationHandler.END)
+            self.assertNotIn(PENDING_SUBMISSION_KEY, context.user_data)
+            self.assertIn("Bildformat wird nicht unterstützt", update.effective_message.replies[-1])
+            self.assertEqual(list((tmpdir_path / "incoming").glob("*")), [])
+
     async def test_submit_and_process_photo_sends_single_immediate_success_message_without_image_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -181,6 +269,24 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             _, text = application.bot.messages[0]
             self.assertEqual(text, "Das Bild wird jetzt angezeigt.")
             self.assertNotIn("Bild-ID", text)
+
+    async def test_process_queued_upload_waits_for_wake_up_during_quiet_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            services.display.sleep_schedule = ("22:00", "07:00")
+            application = _FakeApplication(services)
+            _queue_upload(services, "img-1")
+            night = datetime.now().astimezone().replace(hour=23, minute=30, second=0, microsecond=0)
+
+            with patch("app.time_utils.local_now", return_value=night):
+                await process_queued_upload(application, "img-1")
+
+            self.assertEqual(services.display.calls, 0)
+            self.assertEqual(services.database.get_image_by_id("img-1").status, "rendered")
+            _, text = application.bot.messages[-1]
+            self.assertIn("Ruhezeit", text)
+            self.assertIn("07:00", text)
 
     async def test_process_queued_upload_keeps_image_queued_when_display_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -484,6 +590,29 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(services.config.storage.current_payload_path.exists())
 
 
+
+def _queue_upload(services, image_id: str, created_at: str = "2026-03-18T12:00:00+00:00") -> None:
+    original = services.storage.original_path(image_id)
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_bytes(b"original")
+    services.database.upsert_image(
+        ImageRecord(
+            image_id=image_id,
+            telegram_file_id=f"file-{image_id}",
+            telegram_chat_id=555,
+            local_original_path=str(original),
+            local_rendered_path=None,
+            location="",
+            taken_at="",
+            caption="",
+            uploaded_by=1,
+            created_at=created_at,
+            status="queued",
+            last_error=None,
+            orientation_bucket="horizontal",
+        )
+    )
+
 class _FakeAuth:
     def sync_user(self, user) -> None:
         return None
@@ -522,9 +651,13 @@ class _FakeDisplay:
     def __init__(self, *, orientation: str = "horizontal") -> None:
         self.calls = 0
         self.orientation = orientation
+        self.sleep_schedule: tuple[str, str] | None = None
 
     def current_orientation(self) -> str:
         return self.orientation
+
+    def get_sleep_schedule(self) -> tuple[str, str] | None:
+        return self.sleep_schedule
 
     def display(self, request) -> DisplayResult:
         self.calls += 1
@@ -571,9 +704,28 @@ class _FakePhoto:
         return self._file
 
 
+class _FakeDocument:
+    def __init__(self, token: str, *, mime_type: str, payload: bytes) -> None:
+        self.file_id = f"file-{token}"
+        self.mime_type = mime_type
+        self._file = _FakeTelegramFile(payload)
+
+    async def get_file(self) -> _FakeTelegramFile:
+        return self._file
+
+
 class _FakeMessage:
-    def __init__(self, *, photo_token: str, caption: str = "") -> None:
-        self.photo = [_FakePhoto(photo_token)]
+    def __init__(
+        self,
+        *,
+        photo_token: str | None,
+        caption: str = "",
+        media_group_id: str | None = None,
+        document: _FakeDocument | None = None,
+    ) -> None:
+        self.photo = [_FakePhoto(photo_token)] if photo_token else []
+        self.document = document
+        self.media_group_id = media_group_id
         self.caption = caption
         self.replies: list[str] = []
         self.reply_markups: list[object | None] = []
@@ -602,10 +754,24 @@ class _FakeChat:
 
 
 class _FakeUpdate:
-    def __init__(self, *, user_id: int, chat_id: int, photo_token: str, caption: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        user_id: int,
+        chat_id: int,
+        photo_token: str | None,
+        caption: str = "",
+        media_group_id: str | None = None,
+        document: _FakeDocument | None = None,
+    ) -> None:
         self.effective_user = _FakeUser(user_id)
         self.effective_chat = _FakeChat(chat_id)
-        self.effective_message = _FakeMessage(photo_token=photo_token, caption=caption)
+        self.effective_message = _FakeMessage(
+            photo_token=photo_token,
+            caption=caption,
+            media_group_id=media_group_id,
+            document=document,
+        )
         self.callback_query = None
 
 

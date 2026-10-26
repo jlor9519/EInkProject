@@ -195,7 +195,7 @@ async def _render_status_text(services: AppServices) -> str:
     image_lines = [
         f"- Bibliothek: {format_orientation_label(active_orientation)}",
         f"- In Rotation: {rotation_count} {'Bild' if rotation_count == 1 else 'Bilder'}",
-        f"- Neue Bilder in Warteliste: {hidden_count}",
+        f"- Ältere Bilder außerhalb der Rotation: {hidden_count}",
         f"- Davon aktuell angezeigt: {displayed_count} {'Bild' if displayed_count == 1 else 'Bilder'}",
         f"- Aktuelles Bild: {_format_duration(displayed_at)}",
     ]
@@ -300,7 +300,7 @@ async def _render_list_text(services: AppServices) -> str:
     lines.append(current_line)
     if verification_state == DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY:
         lines.append(f"Hinweis: {_assumed_display_warning(verification_detail)}")
-    lines.append(f"Neue Bilder in Warteliste: {hidden_count}")
+    lines.append(f"Ältere Bilder außerhalb der Rotation: {hidden_count}")
 
     interval = await asyncio.to_thread(services.display.get_slideshow_interval)
 
@@ -894,9 +894,8 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def _delete_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if query is None:
+    if not await _authorize_command_callback(update, context):
         return
-    await query.answer()
 
     offset = int(query.data.split("|")[2])
     services = get_services(context)
@@ -920,9 +919,8 @@ async def _delete_page_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def _delete_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if query is None:
+    if not await _authorize_command_callback(update, context):
         return
-    await query.answer()
 
     parts = query.data.split("|")
     index = int(parts[2])
@@ -987,9 +985,8 @@ async def _delete_select_callback(update: Update, context: ContextTypes.DEFAULT_
 
 async def _delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if query is None:
+    if not await _authorize_command_callback(update, context):
         return
-    await query.answer()
 
     image_id = query.data.split("|")[2]
     services = get_services(context)
@@ -1050,10 +1047,16 @@ async def _delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT
                     f"Aktuelles Bild konnte nicht ersetzt werden. {_friendly_display_error(result.message)}",
                 )
     else:
-        # Not the current image — just delete, no display change needed
-        services.database.delete_image(image_id)
-        for file_path_str in (record.local_original_path, record.local_rendered_path):
-            safe_unlink(file_path_str, logger=logger)
+        # Not the current image — no display change needed, but hold the lock so a slideshow
+        # update that is showing this exact image right now cannot re-create the deleted record.
+        lock = get_display_lock(context)
+        if lock.locked():
+            await _edit_query_message(query, "Eine Aktualisierung läuft bereits. Bitte warten.")
+            return
+        async with lock:
+            services.database.delete_image(image_id)
+            for file_path_str in (record.local_original_path, record.local_rendered_path):
+                safe_unlink(file_path_str, logger=logger)
 
         total = services.database.count_displayed_images(active_orientation)
         await _edit_query_message(
@@ -1064,9 +1067,8 @@ async def _delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT
 
 async def _delete_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if query is None:
+    if not await _authorize_command_callback(update, context):
         return
-    await query.answer()
 
     offset = int(query.data.split("|")[2])
     services = get_services(context)

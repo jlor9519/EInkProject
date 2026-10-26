@@ -870,7 +870,9 @@ class InkyPiAdapter:
             end = str(playlist.get("end_time", "24:00"))
             if start == "00:00" and end in ("24:00", "23:59"):
                 return None
-            return (end, start)
+            # InkyPi uses "24:00" for end of day; as a quiet-hours time that is midnight.
+            quiet_start, wake_up = ("00:00" if value == "24:00" else value for value in (end, start))
+            return quiet_start, wake_up
         return None
 
     def _sync_active_plugin_instance(self, payload_path: Path) -> DisplayResult | None:

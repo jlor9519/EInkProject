@@ -1,6 +1,6 @@
 [Unit]
 Description=Telegram to InkyPi Photo Frame
-After=network-online.target
+After=network-online.target inkypi.service
 Wants=network-online.target
 
 [Service]
