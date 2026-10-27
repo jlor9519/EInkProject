@@ -16,6 +16,7 @@ from app.auth import require_admin, require_whitelist
 from app.display_state import (
     CURRENT_IMAGE_VERIFICATION_DETAIL_KEY,
     CURRENT_IMAGE_VERIFICATION_STATE_KEY,
+    DISPLAY_TRANSITION_KEYS,
     begin_display_transition,
     clear_display_transition,
     commit_display_success,
@@ -1003,6 +1004,31 @@ async def _delete_select_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.warning("Could not edit message for delete preview")
 
 
+async def _delete_last_image_and_show_placeholder(query, services: AppServices, record: ImageRecord) -> None:
+    """Delete the only remaining image and show the "no images yet" screen. Caller holds display_lock."""
+    begin_display_transition(services.database, record.image_id, "delete_placeholder")
+    result = await asyncio.to_thread(services.display.show_placeholder)
+    if not result.success:
+        clear_display_transition(services.database)
+        await _edit_query_message(
+            query,
+            f"Das Bild konnte nicht gelöscht werden. {_friendly_display_error(result.message)}",
+        )
+        return
+    services.database.delete_image(record.image_id)
+    for file_path_str in (record.local_original_path, record.local_rendered_path):
+        safe_unlink(file_path_str, logger=logger)
+    services.database.set_settings(
+        {
+            **{key: None for key in DISPLAY_TRANSITION_KEYS},
+            "current_image_displayed_at": None,
+            CURRENT_IMAGE_VERIFICATION_STATE_KEY: None,
+            CURRENT_IMAGE_VERIFICATION_DETAIL_KEY: None,
+        }
+    )
+    await _edit_query_message(query, "Bild gelöscht. Der Rahmen zeigt jetzt den Hinweis „Noch keine Bilder“.")
+
+
 async def _delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not await _authorize_command_callback(update, context):
@@ -1029,28 +1055,32 @@ async def _delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT
             replacement = services.database.get_adjacent_image(image_id, "next", active_orientation)
             if replacement is None:
                 replacement = services.database.get_adjacent_image(image_id, "prev", active_orientation)
+            if replacement is None:
+                # No other shown image left: show a waiting new image, or else the placeholder.
+                replacement = services.database.get_oldest_rendered_image_for_orientation(active_orientation)
 
             if replacement is None:
-                await _edit_query_message(
-                    query,
-                    "Das letzte Bild kann nicht gelöscht werden. Lade zuerst ein neues Bild hoch.",
-                )
+                await _delete_last_image_and_show_placeholder(query, services, record)
                 return
 
+            replacement_is_new = replacement.status == "rendered"
             begin_display_transition(services.database, replacement.image_id, "delete_replace")
             result = await _display_target(services, replacement)
-            total = services.database.count_displayed_images(active_orientation)
             if result.success:
+                if replacement_is_new:
+                    replacement.status = "displayed"
+                    replacement.last_error = None
                 commit_display_success(
                     services.database,
                     replacement,
-                    mark_new_image=False,
+                    mark_new_image=replacement_is_new,
                     verification_state=result.verification_state or "verified",
                     verification_detail=result.verification_detail,
                 )
                 services.database.delete_image(image_id)
                 for file_path_str in (record.local_original_path, record.local_rendered_path):
                     safe_unlink(file_path_str, logger=logger)
+                total = services.database.count_displayed_images(active_orientation)
                 await _edit_query_message(
                     query,
                     _format_success_reply(
@@ -1061,7 +1091,10 @@ async def _delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT
                 from app.slideshow import reschedule_slideshow_job
                 reschedule_slideshow_job(context.application)
             else:
-                clear_display_transition(services.database)
+                if replacement_is_new:
+                    record_new_image_display_failure(services.database, replacement, result.message)
+                else:
+                    clear_display_transition(services.database)
                 await _edit_query_message(
                     query,
                     f"Aktuelles Bild konnte nicht ersetzt werden. {_friendly_display_error(result.message)}",

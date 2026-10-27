@@ -28,6 +28,7 @@ from app.display_state import (
     DISPLAY_TRANSITION_KEYS,
     begin_display_transition,
     commit_display_success,
+    read_current_payload_image_id,
     record_new_image_display_failure,
 )
 from app.fs_utils import safe_unlink
@@ -631,6 +632,9 @@ async def process_queued_upload(application: Application, image_id: str) -> None
             active_orientation = services.display.current_orientation()
             cooldown = _get_cooldown_seconds(services)
             remaining = _cooldown_remaining(services, cooldown)
+            if read_current_payload_image_id(services.config.storage.current_payload_path) is None:
+                # The frame shows no image (placeholder): nothing on screen to keep for the cooldown.
+                remaining = 0
 
             if not orientation_matches(record.orientation_bucket, active_orientation):
                 record.status = "rendered"

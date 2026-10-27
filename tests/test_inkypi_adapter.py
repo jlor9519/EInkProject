@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl
 
 from PIL import Image
 
@@ -508,6 +509,61 @@ class InkyPiAdapterTests(unittest.TestCase):
                 Path(current_payload["prepared_image_path"]),
                 committed_files[-1],
             )
+
+    def test_show_placeholder_replaces_current_payload_after_successful_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            storage_config = self._build_storage(tmpdir_path)
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="sudo systemctl restart inkypi.service",
+            )
+            self._write_device_config(tmpdir_path, orientation="horizontal")
+            storage_config.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            storage_config.current_payload_path.write_text(json.dumps({"image_id": "img-1"}), encoding="utf-8")
+            storage_config.current_image_path.write_bytes(b"png")
+            adapter = InkyPiAdapter(inkypi_config, storage_config, self._build_display_config())
+            sent_payloads: list[dict] = []
+
+            def fake_urlopen(target, timeout=None):
+                form = dict(parse_qsl(target.data.decode("utf-8")))
+                sent_payloads.append(json.loads(Path(form["payload_path"]).read_text(encoding="utf-8")))
+                return _FakeHttpResponse('{"message":"ok"}')
+
+            with patch("app.inkypi_adapter.request.urlopen", side_effect=fake_urlopen):
+                result = adapter.show_placeholder()
+
+            self.assertTrue(result.success)
+            self.assertTrue(sent_payloads[0]["placeholder"])
+            payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
+            self.assertTrue(payload["placeholder"])
+            self.assertNotIn("image_id", payload)
+            self.assertFalse(storage_config.current_image_path.exists())
+
+    def test_show_placeholder_keeps_current_image_when_refresh_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            storage_config = self._build_storage(tmpdir_path)
+            inkypi_config = self._build_config(
+                tmpdir_path,
+                update_method="http_update_now",
+                update_now_url="http://127.0.0.1/update_now",
+                refresh_command="",
+            )
+            self._write_device_config(tmpdir_path, orientation="horizontal")
+            storage_config.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+            storage_config.current_payload_path.write_text(json.dumps({"image_id": "img-1"}), encoding="utf-8")
+            adapter = InkyPiAdapter(inkypi_config, storage_config, self._build_display_config())
+
+            with patch("app.inkypi_adapter.request.urlopen", side_effect=TimeoutError("timed out")):
+                result = adapter.show_placeholder()
+
+            self.assertFalse(result.success)
+            payload = json.loads(storage_config.current_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["image_id"], "img-1")
+            self.assertEqual(list(storage_config.current_payload_path.parent.glob("tmp*")), [])
 
     def test_display_writes_payload_without_overriding_selected_orientation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

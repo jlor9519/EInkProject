@@ -28,6 +28,9 @@ DEFAULT_CAPTION_TEXT_COLOR = "#111111"
 DEFAULT_CAPTION_BACKGROUND_COLOR = "#FFFFFF"
 DEFAULT_ICON_TEXT_GAP = 6
 DEFAULT_METADATA_LINE_GAP = 2
+DEFAULT_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+PLACEHOLDER_TITLE = "Noch keine Bilder"
+PLACEHOLDER_HINT = "Sende ein Foto an den Telegram-Bot."
 
 
 class TelegramFrame(BasePlugin):
@@ -36,14 +39,22 @@ class TelegramFrame(BasePlugin):
         if not payload_path:
             raise RuntimeError("Missing payload_path in plugin settings.")
 
+        orientation = str(device_config.get_config("orientation") or "horizontal")
+        width, height = self._resolve_dimensions(device_config, orientation)
+
         payload_file = Path(payload_path)
         if not payload_file.exists():
-            raise RuntimeError(f"Payload file not found: {payload_file}")
+            # No image was sent yet (or the library was cleared).
+            return self._placeholder_image(width, height, DEFAULT_FONT_PATH)
 
         try:
             payload = json.loads(payload_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"Payload file is not valid JSON: {exc}") from exc
+
+        if payload.get("placeholder"):
+            # The last image was deleted.
+            return self._placeholder_image(width, height, str(payload.get("font_path") or DEFAULT_FONT_PATH))
 
         image_path = Path(
             payload.get("prepared_image_path")
@@ -53,8 +64,6 @@ class TelegramFrame(BasePlugin):
         if not image_path.exists():
             raise RuntimeError(f"Prepared image not found: {image_path}")
 
-        orientation = str(device_config.get_config("orientation") or "horizontal")
-        width, height = self._resolve_dimensions(device_config, orientation)
         caption_bar_height = self._safe_int(payload.get("caption_bar_height"), DEFAULT_CAPTION_BAR_HEIGHT)
         caption_bar_height = max(0, min(caption_bar_height, height - 1))
         photo_height = max(1, height - caption_bar_height)
@@ -188,6 +197,34 @@ class TelegramFrame(BasePlugin):
 
         return final_image
 
+    def _placeholder_image(self, width: int, height: int, font_path: str) -> Image.Image:
+        image = Image.new("RGB", (width, height), (255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        short_side = min(width, height)
+        max_text_width = int(width * 0.85)
+        lines = [
+            (PLACEHOLDER_TITLE, self._fitting_font(draw, PLACEHOLDER_TITLE, font_path, short_side // 10, max_text_width)),
+            (PLACEHOLDER_HINT, self._fitting_font(draw, PLACEHOLDER_HINT, font_path, short_side // 22, max_text_width)),
+        ]
+        boxes = [draw.textbbox((0, 0), text, font=font) for text, font in lines]
+        gap = max(10, short_side // 16)
+        total_height = sum(box[3] - box[1] for box in boxes) + gap
+        y = (height - total_height) // 2
+        for (text, font), box in zip(lines, boxes):
+            x = (width - (box[2] - box[0])) // 2 - box[0]
+            draw.text((x, y - box[1]), text, font=font, fill=(0, 0, 0))
+            y += (box[3] - box[1]) + gap
+        return image
+
+    def _fitting_font(self, draw, text: str, font_path: str, size: int, max_width: int) -> ImageFont.ImageFont:
+        """The font at the given size, made smaller until the text fits into max_width."""
+        size = max(12, size)
+        font = self._load_font(font_path, size)
+        while size > 12 and draw.textlength(text, font=font) > max_width:
+            size -= 2
+            font = self._load_font(font_path, size)
+        return font
+
     def _resolve_dimensions(self, device_config, orientation: str) -> tuple[int, int]:
         width, height = device_config.get_resolution()
         if orientation == "vertical":
@@ -200,7 +237,12 @@ class TelegramFrame(BasePlugin):
                 return ImageFont.truetype(font_path, size=size)
             except OSError:
                 pass
-        return ImageFont.load_default()
+        try:
+            # Pillow >= 10.1: scalable built-in font, so text keeps its intended size.
+            return ImageFont.load_default(size=size)
+        except TypeError:
+            # Older Pillow (InkyPi's own environment may have one): fixed-size bitmap font.
+            return ImageFont.load_default()
 
     def _truncate_line(
         self,

@@ -119,40 +119,67 @@ class DeleteCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("(kein Text)", reply)
             self.assertIn("▶", reply)
 
-    async def test_delete_confirm_blocks_last_image(self) -> None:
+    async def test_delete_last_image_shows_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             services = _build_services(tmpdir_path)
-            services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
-            services.config.storage.current_payload_path.write_text(
-                json.dumps({"image_id": "img-1"}),
-                encoding="utf-8",
-            )
+            original = _seed_only_image(tmpdir_path, services)
+
+            update = _FakeUpdate(data="del|y|img-1", has_media=False)
+            await _delete_confirm_callback(update, _FakeContext(services))
+
+            self.assertEqual(services.display.placeholder_calls, 1)
+            self.assertIsNone(services.database.get_image_by_id("img-1"))
+            self.assertFalse(original.exists())
+            self.assertIsNone(services.database.get_setting("current_image_displayed_at"))
+            self.assertIn("Noch keine Bilder", update.callback_query.text_edits[-1])
+
+    async def test_delete_last_image_keeps_it_when_placeholder_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services(tmpdir_path)
+            original = _seed_only_image(tmpdir_path, services)
+            services.display.placeholder_result = DisplayResult(False, "InkyPi update_now request timed out after 120 seconds")
+
+            update = _FakeUpdate(data="del|y|img-1", has_media=False)
+            await _delete_confirm_callback(update, _FakeContext(services))
+
+            self.assertIsNotNone(services.database.get_image_by_id("img-1"))
+            self.assertTrue(original.exists())
+            self.assertIn("konnte nicht gelöscht werden", update.callback_query.text_edits[-1])
+
+    async def test_delete_last_shown_image_shows_waiting_new_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            services = _build_services_with_copying_renderer(tmpdir_path)
+            _seed_only_image(tmpdir_path, services)
+            waiting = tmpdir_path / "incoming" / "img-new.jpg"
+            waiting.write_bytes(b"new")
             services.database.upsert_image(
                 ImageRecord(
-                    image_id="img-1",
-                    telegram_file_id="file-1",
+                    image_id="img-new",
+                    telegram_file_id="file-new",
                     telegram_chat_id=111,
-                    local_original_path=str(tmpdir_path / "incoming" / "img-1.jpg"),
+                    local_original_path=str(waiting),
                     local_rendered_path=None,
                     location="",
                     taken_at="",
                     caption="",
                     uploaded_by=1,
-                    created_at="2026-03-18T12:00:00+00:00",
-                    status="displayed",
+                    created_at="2026-03-18T12:30:00+00:00",
+                    status="rendered",
                     last_error=None,
                 )
             )
 
             update = _FakeUpdate(data="del|y|img-1", has_media=False)
-            context = _FakeContext(services)
+            await _delete_confirm_callback(update, _FakeContext(services))
 
-            await _delete_confirm_callback(update, context)
-
-            self.assertEqual(update.callback_query.text_edits, [
-                "Das letzte Bild kann nicht gelöscht werden. Lade zuerst ein neues Bild hoch."
-            ])
+            self.assertEqual(services.display.display_calls, ["img-new"])
+            self.assertEqual(services.display.placeholder_calls, 0)
+            self.assertIsNone(services.database.get_image_by_id("img-1"))
+            self.assertEqual(services.database.get_image_by_id("img-new").status, "displayed")
+            self.assertIn("(1 Bilder verbleibend)", update.callback_query.text_edits[-1])
 
     async def test_delete_cancel_callback_uses_caption_edit_for_media_messages(self) -> None:
         services = _build_services(Path(tempfile.mkdtemp()))
@@ -1512,6 +1539,8 @@ class _FakeDisplay:
         self.orientation = "horizontal"
         self.display_calls: list[str] = []
         self.sleep_schedule = None
+        self.placeholder_calls = 0
+        self.placeholder_result = DisplayResult(True, "placeholder shown")
 
     def current_orientation(self) -> str:
         return self.orientation
@@ -1519,6 +1548,10 @@ class _FakeDisplay:
     def display(self, request) -> DisplayResult:
         self.display_calls.append(request.image_id)
         return DisplayResult(True, f"displayed {request.image_id}")
+
+    def show_placeholder(self) -> DisplayResult:
+        self.placeholder_calls += 1
+        return self.placeholder_result
 
     def payload_exists(self) -> bool:
         return True
@@ -1608,6 +1641,38 @@ def _build_services(base_dir: Path, *, is_admin: bool = False):
     )
 
 
+
+
+def _seed_only_image(base_dir: Path, services) -> Path:
+    original = base_dir / "incoming" / "img-1.jpg"
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_bytes(b"only")
+    services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)
+    services.config.storage.current_payload_path.write_text(json.dumps({"image_id": "img-1"}), encoding="utf-8")
+    services.database.upsert_image(
+        ImageRecord(
+            image_id="img-1",
+            telegram_file_id="file-1",
+            telegram_chat_id=111,
+            local_original_path=str(original),
+            local_rendered_path=None,
+            location="",
+            taken_at="",
+            caption="",
+            uploaded_by=1,
+            created_at="2026-03-18T12:00:00+00:00",
+            status="displayed",
+            last_error=None,
+        )
+    )
+    return original
+
+
+def _build_services_with_copying_renderer(base_dir: Path):
+    services = _build_services(base_dir)
+    services.renderer = _CopyingRenderer()
+    services.storage.cleanup_rendered_cache = lambda: None
+    return services
 
 def _seed_current_and_other_image(base_dir: Path, services) -> None:
     services.config.storage.current_payload_path.parent.mkdir(parents=True, exist_ok=True)

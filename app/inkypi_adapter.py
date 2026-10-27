@@ -121,6 +121,51 @@ class InkyPiAdapter:
             if staged_image_path is not None:
                 self._safe_unlink(staged_image_path)
 
+    def show_placeholder(self) -> DisplayResult:
+        """Show the "no images yet" screen, e.g. after the last image was deleted.
+
+        Like display(), the placeholder payload is staged and only becomes the current payload once
+        InkyPi accepted the refresh, so a failed refresh leaves the current image untouched.
+        """
+        logger.info("Showing the no-images placeholder")
+        staged_payload_path = self._make_temp_path(self.storage.current_payload_path)
+        try:
+            self._write_placeholder_payload(staged_payload_path)
+            result = self._trigger_display_update(
+                staged_payload_path,
+                plugin_payload_path=self.storage.current_payload_path,
+            )
+            if result.success:
+                try:
+                    self._write_placeholder_payload(self.storage.current_payload_path)
+                    self._safe_unlink(self.storage.current_image_path)
+                    result.payload_path = self.storage.current_payload_path
+                finally:
+                    restore_result = self._sync_active_plugin_instance(self.storage.current_payload_path)
+                    if restore_result is not None:
+                        logger.warning(
+                            "Failed to restore Telegram Frame plugin payload to %s after placeholder: %s",
+                            self.storage.current_payload_path,
+                            restore_result.message,
+                        )
+            return result
+        finally:
+            self._safe_unlink(staged_payload_path)
+
+    def _write_placeholder_payload(self, payload_path: Path) -> None:
+        payload = {
+            "placeholder": True,
+            "plugin_id": self.config.plugin_id,
+            "font_path": self.display_config.font_path,
+            "payload_path": str(payload_path),
+        }
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=payload_path.parent, delete=False) as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            temp_path = Path(handle.name)
+        temp_path.replace(payload_path)
+
     def read_device_settings(self) -> dict[str, object]:
         path = self._device_config_path()
         if not path.exists():

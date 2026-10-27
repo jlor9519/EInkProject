@@ -349,6 +349,22 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             _, text = application.bot.messages[-1]
             self.assertIn("automatisch erneut versucht", text)
 
+    async def test_first_upload_after_placeholder_ignores_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            services = _build_services(Path(tmpdir))
+            application = _FakeApplication(services)
+            services.database.set_setting("new_image_cooldown", "3600")
+            services.database.set_setting("last_new_image_displayed_at", datetime.now(timezone.utc).isoformat())
+            payload_path = services.config.storage.current_payload_path
+            payload_path.parent.mkdir(parents=True, exist_ok=True)
+            payload_path.write_text(json.dumps({"placeholder": True}), encoding="utf-8")
+            _queue_upload(services, "img-1")
+
+            await process_queued_upload(application, "img-1")
+
+            self.assertEqual(services.display.calls, 1)
+            self.assertEqual(services.database.get_image_by_id("img-1").status, "displayed")
+
     async def test_process_queued_upload_sends_cooldown_wait_message_without_image_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -359,6 +375,7 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
                 "last_new_image_displayed_at",
                 datetime.now(timezone.utc).isoformat(),
             )
+            _show_current_image(services, "img-shown")
 
             original = services.storage.original_path("img-1")
             original.parent.mkdir(parents=True, exist_ok=True)
@@ -652,6 +669,12 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(services.config.storage.current_payload_path.exists())
 
 
+
+
+def _show_current_image(services, image_id: str) -> None:
+    payload_path = services.config.storage.current_payload_path
+    payload_path.parent.mkdir(parents=True, exist_ok=True)
+    payload_path.write_text(json.dumps({"image_id": image_id}), encoding="utf-8")
 
 def _queue_upload(services, image_id: str, created_at: str = "2026-03-18T12:00:00+00:00") -> None:
     original = services.storage.original_path(image_id)
