@@ -131,6 +131,13 @@ class WaveshareFramePanelTests(unittest.TestCase):
 
         self.assertEqual(self._calls(), ["init", "getbuffer 800x480", "display", "sleep"])
 
+    def test_clear_argument_overrides_the_default_for_one_refresh(self) -> None:
+        panel = self._panel(clear_before_display=True)
+
+        panel.show(Image.new("RGB", (800, 480)), clear=False)
+
+        self.assertEqual(self._calls(), ["init", "getbuffer 800x480", "display", "sleep"])
+
     def test_failed_init_is_reported(self) -> None:
         (self.driver_dir / "epdconfig.py").write_text("INIT_RESULT = -1\n", encoding="utf-8")
 

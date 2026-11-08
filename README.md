@@ -153,8 +153,9 @@ Run the tests with `.venv/bin/python -m pytest`.
 - Panel settings live in the `display` section of `config/config.yaml`:
   - `waveshare_model` (default `epd7in3e`, the Waveshare 7.3 inch E6) picks the driver that is downloaded.
   - `clear_before_display` (default `true`) wipes the panel to white before each image. That avoids
-    ghosting but doubles the refresh time; set it to `false` to try faster refreshes.
+    ghosting but doubles the refresh time. Switch it in Telegram under `/settings` →
+    „Vorher weiß löschen“; that choice overrides the config value.
   - `refresh_timeout_seconds` (default `300`) is how long one refresh may take before it is stopped.
   - `panel: file` writes the panel image to `panel_output_path` instead of driving a panel.
-- Orientation, colour tuning, slideshow interval and quiet hours are changed in the bot's `/settings` menu and stored in the database.
+- Orientation, colour tuning, slideshow interval, quiet hours and the white wipe are changed in the bot's `/settings` menu and stored in the database.
 - The default render size is `800x480`.

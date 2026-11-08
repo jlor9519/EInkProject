@@ -71,6 +71,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
                 ["Bildanpassung: Zuschneiden", "Anzeigedauer: 1 Tag"],
                 ["Ruhezeit: Keine", "Neue Bilder: 1 Stunde"],
                 ["Täglicher Wechsel: Deaktiviert", "Bilder in Rotation: 100"],
+                ["Vorher weiß löschen: An"],
                 ["Abbrechen"],
             ],
         )
@@ -469,6 +470,53 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("\n\nEinstellungen", update.callback_query.text_edits[0])
         labels = [button.text for row in update.callback_query.text_edit_markups[0].inline_keyboard for button in row]
         self.assertIn("Abbrechen", labels)
+
+
+    async def test_panel_wipe_prompt_offers_on_and_off(self) -> None:
+        services = _FakeServices(is_admin=True)
+        update = _FakeCallbackUpdate("settings|select|8", user_id=11)
+        context = _FakeContext(services)
+
+        result = await settings_callback(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_VALUE)
+        self.assertIn("Aktueller Wert für Vorher weiß löschen: An", update.callback_query.text_edits[0])
+        labels = [button.text for row in update.callback_query.text_edit_markups[0].inline_keyboard for button in row]
+        self.assertIn("An", labels)
+        self.assertIn("Aus", labels)
+
+    async def test_panel_wipe_can_be_switched_off_and_on(self) -> None:
+        services = _FakeServices(is_admin=True)
+        context = _FakeContext(services)
+
+        update = _FakeCallbackUpdate("settings|apply|8|aus", user_id=11)
+        result = await settings_callback(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_CHOICE)
+        self.assertEqual(services.display.last_updates, {"clear_before_display": False})
+        self.assertFalse(services.display.last_refresh_current)
+        self.assertIn("Vorher weiß löschen ist jetzt Aus", update.callback_query.text_edits[0])
+        labels = [button.text for row in update.callback_query.text_edit_markups[0].inline_keyboard for button in row]
+        self.assertIn("Vorher weiß löschen: Aus", labels)
+
+        update = _FakeUpdate("an", user_id=11)
+        context.user_data[PENDING_SETTINGS_KEY] = 8
+        await receive_settings_value(update, context)
+
+        self.assertEqual(services.display.last_updates, {"clear_before_display": True})
+        self.assertIn("Vorher weiß löschen ist jetzt An", update.effective_message.replies[0])
+
+    async def test_panel_wipe_rejects_other_text(self) -> None:
+        services = _FakeServices(is_admin=True)
+        update = _FakeUpdate("vielleicht", user_id=11)
+        context = _FakeContext(services)
+        context.user_data[PENDING_SETTINGS_KEY] = 8
+
+        result = await receive_settings_value(update, context)
+
+        self.assertEqual(result, WAITING_FOR_SETTINGS_VALUE)
+        self.assertIsNone(services.display.last_updates)
+        self.assertIn("Bitte wähle An oder Aus", update.effective_message.replies[0])
 
 
 class OrientationSwitchTests(unittest.IsolatedAsyncioTestCase):

@@ -17,14 +17,16 @@ class _RecordingPanel:
     def __init__(self) -> None:
         self.error: str | None = None
         self.shown: list[Image.Image] = []
+        self.clears: list[bool | None] = []
 
     def status(self) -> tuple[bool, str]:
         return True, "Testpanel"
 
-    def show(self, image: Image.Image) -> None:
+    def show(self, image: Image.Image, *, clear: bool | None = None) -> None:
         if self.error:
             raise PanelError(self.error)
         self.shown.append(image)
+        self.clears.append(clear)
 
 
 class FrameDisplayTestCase(unittest.TestCase):
@@ -243,6 +245,20 @@ class SettingsTests(FrameDisplayTestCase):
         self.assertEqual(display.current_orientation(), "horizontal")
         self.assertFalse(display.read_device_settings()["inverted_image"])
         self.assertEqual(self.panel.shown, [])
+
+    def test_panel_wipe_follows_the_config_until_changed_in_settings(self) -> None:
+        self.display_config.clear_before_display = False
+        display = self._display()
+        display.display(self._request("img-1"))
+        self.assertFalse(display.read_device_settings()["clear_before_display"])
+
+        result = display.apply_device_settings({"clear_before_display": True}, refresh_current=False)
+        display.display(self._request("img-2"))
+
+        self.assertTrue(result.success)
+        self.assertTrue(display.read_device_settings()["clear_before_display"])
+        self.assertEqual(self.panel.clears, [False, True])
+        self.assertEqual(len(self.panel.shown), 2)  # switching the setting alone does not redraw
 
     def test_invalid_orientation_is_rejected(self) -> None:
         result = self._display().apply_device_settings({"orientation": "diagonal"}, refresh_current=False)

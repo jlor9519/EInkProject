@@ -42,7 +42,7 @@ class PanelError(RuntimeError):
 
 
 class Panel(Protocol):
-    def show(self, image: Image.Image) -> None: ...
+    def show(self, image: Image.Image, *, clear: bool | None = None) -> None: ...
 
     def status(self) -> tuple[bool, str]: ...
 
@@ -103,7 +103,10 @@ class WaveshareFramePanel:
             return False, f"Waveshare {self.model}: Treiber fehlt in {self.driver_dir}"
         return True, f"Waveshare {self.model}"
 
-    def show(self, image: Image.Image) -> None:
+    def show(self, image: Image.Image, *, clear: bool | None = None) -> None:
+        """Show the image. `clear` overrides clear_before_display for this refresh."""
+        if clear is None:
+            clear = self.clear_before_display
         with self._lock:
             self.work_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=self.work_dir, prefix=".panel-", suffix=".png", delete=False) as handle:
@@ -118,7 +121,7 @@ class WaveshareFramePanel:
                     self.model,
                     "--driver-dir",
                     str(self.driver_dir),
-                    "--clear" if self.clear_before_display else "--no-clear",
+                    "--clear" if clear else "--no-clear",
                     str(image_path),
                 ]
                 logger.info("Refreshing Waveshare %s panel", self.model)
@@ -154,7 +157,8 @@ class FilePanel:
     def status(self) -> tuple[bool, str]:
         return True, f"Datei {self.output_path}"
 
-    def show(self, image: Image.Image) -> None:
+    def show(self, image: Image.Image, *, clear: bool | None = None) -> None:
+        # A file has no previous image to wipe; `clear` only matters for a real panel.
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=self.output_path.parent, suffix=".png", delete=False) as handle:
             temp_path = Path(handle.name)

@@ -53,6 +53,8 @@ INVERTED_IMAGE_KEY = "display_inverted_image"
 IMAGE_SETTINGS_KEY = "display_image_settings"
 SLIDESHOW_INTERVAL_KEY = "display_slideshow_interval"
 SLEEP_SCHEDULE_KEY = "display_sleep_schedule"
+# Unset until changed in /settings; until then display.clear_before_display from the config applies.
+CLEAR_BEFORE_DISPLAY_KEY = "display_clear_before_display"
 SETTINGS_INITIALIZED_KEY = "display_settings_initialized"
 
 # Written by older versions that kept these settings in InkyPi's device.json.
@@ -144,7 +146,7 @@ class FrameDisplay:
             image_settings=settings["image_settings"],
         )
         try:
-            self.panel.show(panel_image)
+            self.panel.show(panel_image, clear=settings["clear_before_display"])
         except PanelError as exc:
             logger.warning("Panel refresh failed: %s", exc)
             return DisplayResult(False, str(exc))
@@ -268,10 +270,15 @@ class FrameDisplay:
         image_settings = dict(DEFAULT_IMAGE_SETTINGS)
         stored = _parse_json_dict(self.database.get_setting(IMAGE_SETTINGS_KEY))
         image_settings.update({key: value for key, value in stored.items() if _is_number(value)})
+        stored_clear = self.database.get_setting(CLEAR_BEFORE_DISPLAY_KEY)
+        clear_before_display = (
+            self.display_config.clear_before_display if stored_clear is None else stored_clear == "1"
+        )
         return {
             "orientation": orientation,
             "inverted_image": inverted,
             "image_settings": image_settings,
+            "clear_before_display": clear_before_display,
         }
 
     def current_orientation(self) -> str:
@@ -329,6 +336,8 @@ class FrameDisplay:
             values[ORIENTATION_KEY] = orientation
         if "inverted_image" in updates:
             values[INVERTED_IMAGE_KEY] = "1" if updates["inverted_image"] else "0"
+        if "clear_before_display" in updates:
+            values[CLEAR_BEFORE_DISPLAY_KEY] = "1" if updates["clear_before_display"] else "0"
         if "image_settings" in updates:
             image_settings = dict(current["image_settings"])
             for key, value in dict(updates["image_settings"]).items():

@@ -29,5 +29,5 @@ display:
   panel: waveshare                  # waveshare, or file to write data/panel.png instead (testing)
   waveshare_model: epd7in3e         # Waveshare 7.3 inch Spectra 6 (E6)
   driver_dir: vendor/waveshare_epd  # downloaded by scripts/install.sh and scripts/update.sh
-  clear_before_display: true        # wipe to white before each image: no ghosting, but twice as slow
+  clear_before_display: true        # wipe to white first: no ghosting, twice as slow; /settings overrides
   refresh_timeout_seconds: 300      # stop a refresh that hangs (e.g. a loose cable)

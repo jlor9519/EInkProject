@@ -53,7 +53,7 @@ class _SettingDef:
     label: str
     key: str               # frame setting key, or db setting key
     subkey: str | None     # key inside image_settings, or None
-    kind: str              # "image_tuning" | "orientation" | "fit_mode" | "integer" | "interval" | "sleep_schedule"
+    kind: str              # "image_tuning" | "orientation" | "fit_mode" | "integer" | "interval" | "sleep_schedule" | "panel_wipe"
 
 
 _SETTINGS: list[_SettingDef] = [
@@ -65,6 +65,7 @@ _SETTINGS: list[_SettingDef] = [
     _SettingDef("Wartezeit neue Bilder", "new_image_cooldown", None,         "cooldown"),
     _SettingDef("Täglicher Bildwechsel", "scheduled_change_time", None,     "scheduled_time"),
     _SettingDef("Bilder in Rotation",  "rotation_limit",       None,         "integer"),
+    _SettingDef("Vorher weiß löschen", "clear_before_display", None,         "panel_wipe"),
 ]
 
 _IMAGE_TUNING_FIELDS: list[tuple[str, str]] = [
@@ -147,9 +148,19 @@ _FIT_MODE_MAP = {
 }
 
 
+_ON_WORDS = ("an", "ein", "on", "ja", "yes", "true", "1")
+_OFF_WORDS = ("aus", "off", "nein", "no", "false", "0")
+
+
+def _on_off_label(value: Any) -> str:
+    return "An" if value else "Aus"
+
+
 def _get_current_value(settings: dict[str, Any], s: _SettingDef) -> str:
     if s.kind == "image_tuning":
         return "4 Werte"
+    if s.kind == "panel_wipe":
+        return _on_off_label(settings.get("clear_before_display", True))
     if s.kind == "orientation":
         return format_orientation_label(str(settings.get("orientation", "?")))
     if s.kind == "fit_mode":
@@ -279,6 +290,9 @@ def _settings_menu_keyboard(settings: dict[str, Any]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"Täglicher Wechsel: {_get_current_value(settings, _SETTINGS[6])}", callback_data=_settings_callback_data("select", 6)),
             InlineKeyboardButton(f"Bilder in Rotation: {_get_current_value(settings, _SETTINGS[7])}", callback_data=_settings_callback_data("select", 7)),
         ],
+        [
+            InlineKeyboardButton(f"Vorher weiß löschen: {_get_current_value(settings, _SETTINGS[8])}", callback_data=_settings_callback_data("select", 8)),
+        ],
         [InlineKeyboardButton("Abbrechen", callback_data=_settings_callback_data("close"))],
     ]
     return InlineKeyboardMarkup(rows)
@@ -298,6 +312,13 @@ def _settings_prompt_keyboard(idx: int, s: _SettingDef) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("Zuschneiden", callback_data=_settings_callback_data("apply", idx, "fill")),
                 InlineKeyboardButton("Einpassen", callback_data=_settings_callback_data("apply", idx, "contain")),
+            ]
+        )
+    elif s.kind == "panel_wipe":
+        rows.append(
+            [
+                InlineKeyboardButton("An", callback_data=_settings_callback_data("apply", idx, "an")),
+                InlineKeyboardButton("Aus", callback_data=_settings_callback_data("apply", idx, "aus")),
             ]
         )
     elif s.kind == "integer":
@@ -400,6 +421,19 @@ def _prompt_text_for_setting(services, idx: int, notice: str | None = None) -> s
                 "Wenn aktiv, wird der Bildwechsel genau zu dieser Zeit ausgelöst — unabhängig von der Anzeigedauer.",
                 "",
                 "Oder deaktiviere den täglichen Bildwechsel per Button.",
+            ]
+        )
+    elif s.kind == "panel_wipe":
+        lines.extend(
+            [
+                f"Aktueller Wert für {s.label}: {current}",
+                "",
+                "An — das Display wird vor jedem Bild erst komplett weiß, dann erscheint das neue Bild. "
+                "Kein Nachbild, aber ein Bildwechsel dauert etwa doppelt so lang.",
+                "Aus — das neue Bild wird direkt gezeichnet. Etwa doppelt so schnell, es kann aber ein "
+                "leichtes Nachbild des vorherigen Bildes bleiben.",
+                "",
+                "Wähle den neuen Wert per Button.",
             ]
         )
     elif s.kind == "integer":
@@ -929,6 +963,40 @@ async def _apply_setting_value(
             update,
             context,
             notice=_notice(f"{s.label} ist jetzt {orientation_label}.", switch_message, result.message),
+        )
+
+    if s.kind == "panel_wipe":
+        if text in _ON_WORDS:
+            enabled = True
+        elif text in _OFF_WORDS:
+            enabled = False
+        else:
+            return await _show_setting_prompt(
+                update,
+                context,
+                idx,
+                notice="Ungültiger Wert. Bitte wähle An oder Aus, oder nutze den Button „Abbrechen“.",
+            )
+        try:
+            result = await _run_device_change(
+                context,
+                services.display.apply_device_settings,
+                {"clear_before_display": enabled},
+                refresh_current=False,
+            )
+        except Exception as exc:
+            logger.exception("Failed to save the panel wipe setting")
+            await _respond_settings_message(update, f"Fehler beim Speichern der Einstellung: {exc}")
+            return WAITING_FOR_SETTINGS_VALUE
+        if not result.success:
+            return await _show_settings_menu(update, context, notice=_notice(result.message))
+        return await _show_settings_menu(
+            update,
+            context,
+            notice=_notice(
+                f"{s.label} ist jetzt {_on_off_label(enabled)}.",
+                "Gilt ab dem nächsten Bildwechsel, zum Ausprobieren z. B. mit /next.",
+            ),
         )
 
     if s.kind == "fit_mode":

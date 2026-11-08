@@ -584,14 +584,16 @@ class _RecordingPanel:
     def __init__(self, error: str | None = None) -> None:
         self.error = error
         self.shown: list = []
+        self.clears: list = []
 
     def status(self) -> tuple[bool, str]:
         return True, "Testpanel"
 
-    def show(self, image) -> None:
+    def show(self, image, *, clear: bool | None = None) -> None:
         if self.error:
             raise PanelError(self.error)
         self.shown.append(image)
+        self.clears.append(clear)
 
 
 def _build_services_with_real_adapter(base_dir: Path, *, interval_seconds: int, panel_error: str | None = None):
