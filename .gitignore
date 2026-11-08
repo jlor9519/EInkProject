@@ -37,3 +37,7 @@ logs/*
 !data/inkypi/.gitkeep
 !logs/.gitkeep
 .claude
+
+# Waveshare panel drivers, downloaded by the install/update scripts
+vendor/
+data/panel.png

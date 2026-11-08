@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 JOB_NAME = "slideshow_advance"
 RETRY_DELAY_SECONDS = 60
-# Give InkyPi time to come up after a (nightly) reboot before the first slideshow fire.
+# Give the Pi time to settle after a (nightly) reboot before the first slideshow fire.
 STARTUP_GRACE_SECONDS = 120
 
 

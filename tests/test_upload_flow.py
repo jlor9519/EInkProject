@@ -28,8 +28,9 @@ from app.conversations import (
     receive_text_choice,
 )
 from app.database import Database
-from app.inkypi_adapter import InkyPiAdapter
-from app.models import DisplayConfig, DisplayResult, ImageRecord, InkyPiConfig, StorageConfig
+from app.frame_display import FrameDisplay
+from app.panel import PanelError
+from app.models import DisplayConfig, DisplayResult, ImageRecord, StorageConfig
 
 
 class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -577,98 +578,60 @@ class UploadFlowTests(unittest.IsolatedAsyncioTestCase):
             await task
             self.assertEqual(display.calls, 1)
 
-    async def test_process_queued_upload_uses_command_fallback_after_http_timeout(self) -> None:
+    async def test_process_queued_upload_shows_the_image_on_the_panel(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             services = _build_services_with_real_adapter(tmpdir_path)
             application = _FakeApplication(services)
+            _queue_real_upload(services, "img-1")
 
-            original = services.storage.original_path("img-1")
-            original.parent.mkdir(parents=True, exist_ok=True)
-            original.write_bytes(b"original")
-            services.database.upsert_image(
-                ImageRecord(
-                    image_id="img-1",
-                    telegram_file_id="file-1",
-                    telegram_chat_id=555,
-                    local_original_path=str(original),
-                    local_rendered_path=None,
-                    location="",
-                    taken_at="",
-                    caption="",
-                    uploaded_by=1,
-                    created_at="2026-03-18T12:00:00+00:00",
-                    status="queued",
-                    last_error=None,
-                    orientation_bucket="horizontal",
-                )
-            )
-
-            with patch(
-                "app.inkypi_adapter.request.urlopen",
-                side_effect=TimeoutError("timed out"),
-            ), patch(
-                "app.inkypi_adapter.subprocess.run",
-                return_value=SimpleNamespace(returncode=0, stdout="refresh ok", stderr=""),
-            ):
-                await process_queued_upload(application, "img-1")
+            await process_queued_upload(application, "img-1")
 
             record = services.database.get_image_by_id("img-1")
             self.assertEqual(record.status, "displayed")
             self.assertEqual(application.bot.messages, [(555, "Das Bild wird jetzt angezeigt.")])
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["image_id"], "img-1")
-            self.assertTrue(services.display.backend_diagnostics()["degraded"])
+            self.assertTrue(Path(payload["prepared_image_path"]).is_file())
+            self.assertTrue(services.config.storage.current_image_path.is_file())
+            self.assertEqual(len(services.display.panel.shown), 1)
 
-    async def test_process_queued_upload_marks_unverified_display_when_restart_recovery_cannot_verify_refresh(self) -> None:
+    async def test_process_queued_upload_keeps_waiting_when_the_panel_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
-            services = _build_services_with_real_adapter(
-                tmpdir_path,
-                refresh_command="sudo systemctl restart inkypi.service",
-            )
+            services = _build_services_with_real_adapter(tmpdir_path, panel_error="SPI nicht verfügbar")
             application = _FakeApplication(services)
+            _queue_real_upload(services, "img-1")
 
-            original = services.storage.original_path("img-1")
-            original.parent.mkdir(parents=True, exist_ok=True)
-            original.write_bytes(b"original")
-            services.database.upsert_image(
-                ImageRecord(
-                    image_id="img-1",
-                    telegram_file_id="file-1",
-                    telegram_chat_id=555,
-                    local_original_path=str(original),
-                    local_rendered_path=None,
-                    location="",
-                    taken_at="",
-                    caption="",
-                    uploaded_by=1,
-                    created_at="2026-03-18T12:00:00+00:00",
-                    status="queued",
-                    last_error=None,
-                    orientation_bucket="horizontal",
-                )
-            )
-
-            with patch(
-                "app.inkypi_adapter.request.urlopen",
-                side_effect=TimeoutError("timed out"),
-            ), patch(
-                "app.inkypi_adapter.subprocess.run",
-                return_value=SimpleNamespace(returncode=0, stdout="active", stderr=""),
-            ), patch.object(
-                services.display,
-                "_wait_for_inkypi_http_ready",
-                return_value="connection refused",
-            ):
-                await process_queued_upload(application, "img-1")
+            await process_queued_upload(application, "img-1")
 
             record = services.database.get_image_by_id("img-1")
-            self.assertEqual(record.status, "displayed_with_warnings")
-            self.assertIn("nicht vollständig verifiziert", application.bot.messages[0][1])
-            self.assertTrue(services.config.storage.current_payload_path.exists())
+            self.assertNotEqual(record.status, "displayed")
+            self.assertEqual(record.last_error, "SPI nicht verfügbar")
+            self.assertFalse(services.config.storage.current_payload_path.exists())
 
 
+def _queue_real_upload(services, image_id: str) -> None:
+    original = services.storage.original_path(image_id)
+    original.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (40, 30), (120, 80, 40)).save(original, format="PNG")
+    services.database.upsert_image(
+        ImageRecord(
+            image_id=image_id,
+            telegram_file_id=f"file-{image_id}",
+            telegram_chat_id=555,
+            local_original_path=str(original),
+            local_rendered_path=None,
+            location="",
+            taken_at="",
+            caption="",
+            uploaded_by=1,
+            created_at="2026-03-18T12:00:00+00:00",
+            status="queued",
+            last_error=None,
+            orientation_bucket="horizontal",
+        )
+    )
 
 
 def _show_current_image(services, image_id: str) -> None:
@@ -752,7 +715,7 @@ class _FakeDisplay:
 class _FailingDisplay(_FakeDisplay):
     def display(self, request) -> DisplayResult:
         self.calls += 1
-        return DisplayResult(False, "InkyPi update_now request failed: connection refused")
+        return DisplayResult(False, "Das Display hat nach 300 Sekunden nicht reagiert.")
 
 
 class _FakeBot:
@@ -930,14 +893,29 @@ def _build_services(
     )
 
 
+class _RecordingPanel:
+    def __init__(self, error: str | None = None) -> None:
+        self.error = error
+        self.shown: list = []
+
+    def status(self) -> tuple[bool, str]:
+        return True, "Testpanel"
+
+    def show(self, image) -> None:
+        if self.error:
+            raise PanelError(self.error)
+        self.shown.append(image)
+
+
 def _build_services_with_real_adapter(
     base_dir: Path,
     *,
     bot: _FakeBot | None = None,
-    refresh_command: str = "echo refresh",
+    panel_error: str | None = None,
 ):
     database = Database(base_dir / "photo_frame.db")
     database.initialize()
+    database.set_setting("display_orientation", "horizontal")
     storage = _FakeStorage(base_dir)
     storage_config = StorageConfig(
         incoming_dir=base_dir / "incoming",
@@ -958,26 +936,13 @@ def _build_services_with_real_adapter(
         font_path="/tmp/does-not-exist.ttf",
         text_color="#111111",
     )
-    inkypi_config = InkyPiConfig(
-        repo_path=base_dir / "InkyPi",
-        install_path=base_dir / "usr" / "local" / "inkypi",
-        validated_commit="main",
-        waveshare_model="epd7in3e",
-        plugin_id="telegram_frame",
-        update_method="http_update_now",
-        update_now_url="http://127.0.0.1/update_now",
-        refresh_command=refresh_command,
-    )
-    device_config_path = base_dir / "InkyPi" / "src" / "config" / "device.json"
-    device_config_path.parent.mkdir(parents=True, exist_ok=True)
-    device_config_path.write_text(json.dumps({"orientation": "horizontal"}), encoding="utf-8")
     fake_bot = bot or _FakeBot()
     return SimpleNamespace(
         auth=_FakeAuth(),
         database=database,
         storage=storage,
         renderer=_FakeRenderer(),
-        display=InkyPiAdapter(inkypi_config, storage_config, display_config, database=database),
+        display=FrameDisplay(_RecordingPanel(panel_error), storage_config, display_config, database),
         config=SimpleNamespace(storage=storage_config),
         bot=fake_bot,
     )

@@ -120,11 +120,11 @@ class EndOfDayTimeTests(_BerlinTimezoneMixin, unittest.TestCase):
         self.assertEqual(wake_up.astimezone(berlin).strftime("%H:%M"), "07:00")
 
     def test_inkypi_playlist_ending_at_24_00_maps_to_midnight_quiet_start(self) -> None:
-        from app.inkypi_adapter import InkyPiAdapter
+        from app.frame_display import _legacy_sleep_schedule
 
         data = {"playlist_config": {"playlists": [{"start_time": "07:00", "end_time": "24:00"}]}}
 
-        self.assertEqual(InkyPiAdapter._extract_sleep_schedule(None, data), ("00:00", "07:00"))
+        self.assertEqual(_legacy_sleep_schedule(data), ("00:00", "07:00"))
 
 
 if __name__ == "__main__":

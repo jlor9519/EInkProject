@@ -286,7 +286,7 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         services = _FakeServices(is_admin=True)
         services.display.apply_result = DeviceSettingsApplyResult(
             success=True,
-            message="Einstellungen wurden gespeichert, InkyPi wurde neu geladen und die Anzeige aktualisiert.",
+            message="Die Anzeige wurde aktualisiert.",
             confirmed_settings={
                 "image_settings": {
                     "saturation": 1.8,
@@ -295,7 +295,6 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
                     "brightness": 1.1,
                 }
             },
-            device_config_path=services.display.device_config_path,
         )
         update = _FakeCallbackUpdate("settings|tuning_save", user_id=11)
         context = _FakeContext(services)
@@ -407,13 +406,12 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
         services = _FakeServices(is_admin=True)
         services.display.apply_result = DeviceSettingsApplyResult(
             success=True,
-            message="Einstellungen wurden gespeichert und InkyPi wurde neu geladen.",
+            message="",
             confirmed_settings={
                 "orientation": "vertical",
                 "inverted_image": True,
                 "image_settings": services.display.settings["image_settings"],
             },
-            device_config_path=services.display.device_config_path,
         )
         update = _FakeUpdate("vertical", user_id=11)
         context = _FakeContext(services)
@@ -437,7 +435,6 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
             success=True,
             message="ok",
             confirmed_settings={"orientation": "horizontal"},
-            device_config_path=services.display.device_config_path,
         )
         update = _FakeUpdate("querformat", user_id=11)
         context = _FakeContext(services)
@@ -459,7 +456,6 @@ class SettingsConversationTests(unittest.IsolatedAsyncioTestCase):
             success=True,
             message="ok",
             confirmed_settings={"orientation": "horizontal"},
-            device_config_path=services.display.device_config_path,
         )
         update = _FakeCallbackUpdate("settings|apply|1|horizontal", user_id=11)
         context = _FakeContext(services)
@@ -603,7 +599,7 @@ class SettingsAndUploadRoutingTests(unittest.IsolatedAsyncioTestCase):
 
     def _slow_set_interval(self, seconds: int) -> DeviceSettingsApplyResult:
         self.release_apply.wait(5)
-        return DeviceSettingsApplyResult(True, "ok", {}, None)
+        return DeviceSettingsApplyResult(True, "ok", {})
 
     async def _record_reply(self, text, *args, **kwargs):
         self.replies.append(text)
@@ -686,7 +682,6 @@ class _FakeAuth:
 
 class _FakeDisplay:
     def __init__(self) -> None:
-        self.device_config_path = "/tmp/device.json"
         self.orientation = "vertical"
         self.settings = {
             "orientation": "vertical",
@@ -702,7 +697,6 @@ class _FakeDisplay:
             success=True,
             message="ok",
             confirmed_settings=self.settings,
-            device_config_path=self.device_config_path,
         )
         self.last_updates: dict[str, object] | None = None
         self.last_refresh_current: bool | None = None
@@ -750,7 +744,6 @@ class _FakeDisplay:
             success=self.apply_result.success,
             message=self.apply_result.message,
             confirmed_settings=merged_settings,
-            device_config_path=self.apply_result.device_config_path,
         )
         return self.apply_result
 
@@ -761,7 +754,6 @@ class _FakeDisplay:
             success=True,
             message="ok",
             confirmed_settings={"slideshow_interval": seconds},
-            device_config_path=self.device_config_path,
         )
 
     def set_sleep_schedule(self, start: str | None, end: str | None) -> DeviceSettingsApplyResult:
@@ -770,7 +762,6 @@ class _FakeDisplay:
             success=True,
             message="ok",
             confirmed_settings={"sleep_schedule": (start, end)},
-            device_config_path=self.device_config_path,
         )
 
 
@@ -797,8 +788,7 @@ class _FakeServices:
 
 
 class _FakeConfig:
-    def __init__(self) -> None:
-        self.inkypi = SimpleNamespace(update_method="http_update_now")
+    pass
 
 
 class _FakeMessage:
@@ -890,7 +880,6 @@ class _FakeBot:
 
 class _RealishDisplay:
     def __init__(self) -> None:
-        self.device_config_path = "/tmp/device.json"
         self.orientation = "vertical"
         self.display_calls: list[str] = []
 
@@ -913,9 +902,8 @@ class _RealishDisplay:
         self.orientation = orientation
         return DeviceSettingsApplyResult(
             success=True,
-            message="Einstellungen wurden gespeichert und InkyPi wurde neu geladen.",
+            message="",
             confirmed_settings={"orientation": orientation},
-            device_config_path=self.device_config_path,
         )
 
     def display(self, request) -> DisplayResult:

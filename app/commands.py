@@ -181,20 +181,7 @@ async def _render_status_text(services: AppServices) -> str:
         }
     storage_ok = bool(storage_details["paths_exist"] and storage_details["writable"])
     payload_ok = services.display.payload_exists()
-    diagnostics_fn = getattr(services.display, "runtime_settings_diagnostics", None)
-    runtime_diagnostics = diagnostics_fn() if callable(diagnostics_fn) else {"degraded": False, "message": ""}
-    backend_diagnostics_fn = getattr(services.display, "backend_diagnostics", None)
-    backend_diagnostics = (
-        backend_diagnostics_fn() if callable(backend_diagnostics_fn) else {"degraded": False, "message": ""}
-    )
-
-    inkypi_reachable = await asyncio.to_thread(services.display.ping_inkypi)
-    if inkypi_reachable is None:
-        inkypi_line = "– lokal"
-    elif inkypi_reachable:
-        inkypi_line = "✓ erreichbar"
-    else:
-        inkypi_line = "✗ nicht erreichbar"
+    panel_ok, panel_description = services.display.panel_status()
 
     rotation_count = services.database.count_rotation_pool_images(active_orientation)
     hidden_count = services.database.count_hidden_rotation_images(active_orientation)
@@ -220,15 +207,11 @@ async def _render_status_text(services: AppServices) -> str:
         f"- Speicher: {'✓ ok' if storage_ok else '✗ Fehler'}",
         f"- Speicher schreibbar: {'✓ ok' if storage_details['writable'] else '✗ Fehler'}",
         f"- Freier Speicher: {free_space}",
-        f"- InkyPi: {inkypi_line}",
-        f"- InkyPi-Payload: {'✓ vorhanden' if payload_ok else '✗ nicht gefunden'}",
+        f"- Display: {'✓' if panel_ok else '✗'} {panel_description}",
+        f"- Anzeigedaten: {'✓ vorhanden' if payload_ok else '✗ nicht gefunden'}",
     ]
 
     warnings: list[str] = []
-    if runtime_diagnostics["degraded"]:
-        warnings.append(str(runtime_diagnostics["message"]))
-    if backend_diagnostics["degraded"]:
-        warnings.append(str(backend_diagnostics["message"]))
     verification_state, verification_detail = _current_display_verification(services)
     if verification_state == DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY:
         warnings.append(_assumed_display_warning(verification_detail))
@@ -482,12 +465,6 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 def _friendly_display_error(message: str) -> str:
-    lower = message.lower()
-    if any(p in lower for p in (
-        "request failed", "timed out", "connection refused",
-        "no route to host", "network is unreachable",
-    )):
-        return "Display nicht erreichbar. Bitte prüfe die Verbindung zum Pi."
     return f"Anzeige fehlgeschlagen: {message}"
 
 

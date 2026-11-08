@@ -26,16 +26,8 @@ display:
   caption_character_limit: 72
   font_path: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
   text_color: "#111111"
-
-inkypi:
-  repo_path: ~/InkyPi
-  install_path: /usr/local/inkypi
-  validated_commit: main
-  waveshare_model: epd7in3e
-  plugin_id: telegram_frame
-  payload_dir: data/inkypi
-  update_method: http_update_now    # http_update_now or command
-  update_now_url: http://127.0.0.1/update_now
-  update_now_timeout_seconds: 120
-  refresh_command_timeout_seconds: 150
-  refresh_command: sudo systemctl restart inkypi.service  # primary trigger in command mode; recovery command in http_update_now mode and treated as assumed-success if the panel likely updated but verification stays too slow
+  panel: waveshare                  # waveshare, or file to write data/panel.png instead (testing)
+  waveshare_model: epd7in3e         # Waveshare 7.3 inch Spectra 6 (E6)
+  driver_dir: vendor/waveshare_epd  # downloaded by scripts/install.sh and scripts/update.sh
+  clear_before_display: true        # wipe to white before each image: no ghosting, but twice as slow
+  refresh_timeout_seconds: 300      # stop a refresh that hangs (e.g. a loose cable)

@@ -10,10 +10,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from PIL import Image
+
 from app.commands import list_command
 from app.database import Database
-from app.inkypi_adapter import InkyPiAdapter
-from app.models import DisplayConfig, DisplayResult, ImageRecord, InkyPiConfig, StorageConfig
+from app.frame_display import FrameDisplay
+from app.panel import PanelError
+from app.models import DisplayConfig, DisplayResult, ImageRecord, StorageConfig
 from app.display_state import (
     MAX_NEW_IMAGE_DISPLAY_ATTEMPTS,
     ROTATION_SKIP_FROM_KEY,
@@ -163,66 +166,42 @@ class SlideshowScheduledModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(services.display.display_calls, ["img-2"])
             self.assertIsNone(services.database.get_setting(ROTATION_SKIP_FROM_KEY))
 
-    async def test_auto_advance_uses_command_fallback_while_http_backend_is_degraded(self) -> None:
+    async def test_auto_advance_shows_the_next_image_on_the_panel(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             services = _build_services_with_real_adapter(tmpdir_path, interval_seconds=7200)
             _seed_displayed_images(tmpdir_path, services, ["img-1", "img-2", "img-3"])
             context = _JobContext(services)
 
-            with patch(
-                "app.inkypi_adapter.request.urlopen",
-                side_effect=TimeoutError("timed out"),
-            ) as mock_http, patch(
-                "app.inkypi_adapter.subprocess.run",
-                return_value=SimpleNamespace(returncode=0, stdout="refresh ok", stderr=""),
-            ) as mock_command, patch("app.inkypi_adapter.time.sleep"):
-                await _advance_slideshow(context)
-                await _advance_slideshow(context)
+            await _advance_slideshow(context)
 
+            # The rotation wraps from the oldest image to the newest one.
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-2")
-            self.assertEqual(mock_http.call_count, 1)
-            self.assertEqual(mock_command.call_count, 2)
+            self.assertEqual(payload["image_id"], "img-3")
+            self.assertEqual(len(services.display.panel.shown), 1)
             self.assertNotEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
 
             update = _MessageUpdate()
             command_context = _CommandContext(services)
             await list_command(update, command_context)
-            self.assertIn('"img-2"', update.effective_message.replies[0])
+            self.assertIn('"img-3"', update.effective_message.replies[0])
 
-    async def test_auto_advance_stays_in_display_error_when_restart_recovery_cannot_verify_refresh(self) -> None:
+    async def test_auto_advance_keeps_the_current_image_when_the_panel_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             services = _build_services_with_real_adapter(
                 tmpdir_path,
                 interval_seconds=7200,
-                refresh_command="sudo systemctl restart inkypi.service",
+                panel_error="Das Display hat nach 300 Sekunden nicht reagiert.",
             )
             _seed_displayed_images(tmpdir_path, services, ["img-1", "img-2"])
             context = _JobContext(services)
 
-            with patch(
-                "app.inkypi_adapter.request.urlopen",
-                side_effect=TimeoutError("timed out"),
-            ), patch(
-                "app.inkypi_adapter.subprocess.run",
-                return_value=SimpleNamespace(returncode=0, stdout="active", stderr=""),
-            ), patch.object(
-                services.display,
-                "_wait_for_inkypi_http_ready",
-                return_value="connection refused",
-            ):
-                await _advance_slideshow(context)
+            await _advance_slideshow(context)
 
             payload = json.loads(services.config.storage.current_payload_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["image_id"], "img-2")
-            self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "interval")
-
-            update = _MessageUpdate()
-            command_context = _CommandContext(services)
-            await list_command(update, command_context)
-            self.assertIn('"img-2"', update.effective_message.replies[0])
+            self.assertEqual(payload["image_id"], "img-1")
+            self.assertEqual(services.database.get_setting("slideshow_next_fire_mode"), "display_error")
 
     async def test_auto_advance_ignores_images_hidden_by_rotation_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -464,7 +443,7 @@ class WaitingQueueTests(unittest.IsolatedAsyncioTestCase):
             record = _seed_image(tmpdir_path, services, "new-1", "2026-03-18T13:00:00+00:00", "rendered")
 
             results = [
-                record_new_image_display_failure(services.database, record, "InkyPi down")
+                record_new_image_display_failure(services.database, record, "Display down")
                 for _ in range(MAX_NEW_IMAGE_DISPLAY_ATTEMPTS)
             ]
 
@@ -601,9 +580,29 @@ def _build_services(base_dir: Path, *, interval_seconds: int):
     )
 
 
-def _build_services_with_real_adapter(base_dir: Path, *, interval_seconds: int, refresh_command: str = "echo refresh"):
+class _RecordingPanel:
+    def __init__(self, error: str | None = None) -> None:
+        self.error = error
+        self.shown: list = []
+
+    def status(self) -> tuple[bool, str]:
+        return True, "Testpanel"
+
+    def show(self, image) -> None:
+        if self.error:
+            raise PanelError(self.error)
+        self.shown.append(image)
+
+
+def _build_services_with_real_adapter(base_dir: Path, *, interval_seconds: int, panel_error: str | None = None):
     database = Database(base_dir / "photo_frame.db")
     database.initialize()
+    database.set_settings(
+        {
+            "display_orientation": "horizontal",
+            "display_slideshow_interval": str(interval_seconds),
+        }
+    )
     storage_config = StorageConfig(
         incoming_dir=base_dir / "incoming",
         rendered_dir=base_dir / "rendered",
@@ -623,23 +622,10 @@ def _build_services_with_real_adapter(base_dir: Path, *, interval_seconds: int, 
         font_path="/tmp/does-not-exist.ttf",
         text_color="#111111",
     )
-    inkypi_config = InkyPiConfig(
-        repo_path=base_dir / "InkyPi",
-        install_path=base_dir / "usr" / "local" / "inkypi",
-        validated_commit="main",
-        waveshare_model="epd7in3e",
-        plugin_id="telegram_frame",
-        update_method="http_update_now",
-        update_now_url="http://127.0.0.1/update_now",
-        refresh_command=refresh_command,
-    )
-    device_config_path = base_dir / "InkyPi" / "src" / "config" / "device.json"
-    device_config_path.parent.mkdir(parents=True, exist_ok=True)
-    device_config_path.write_text(json.dumps({"orientation": "horizontal"}), encoding="utf-8")
     return SimpleNamespace(
         auth=_FakeAuth(),
         database=database,
-        display=InkyPiAdapter(inkypi_config, storage_config, display_config, database=database),
+        display=FrameDisplay(_RecordingPanel(panel_error), storage_config, display_config, database),
         storage=_FakeStorage(base_dir),
         renderer=_FakeRenderer(),
         config=SimpleNamespace(
@@ -652,7 +638,7 @@ def _seed_displayed_images(base_dir: Path, services, image_ids: list[str]) -> No
     for index, image_id in enumerate(image_ids):
         original = base_dir / "incoming" / f"{image_id}.jpg"
         original.parent.mkdir(parents=True, exist_ok=True)
-        original.write_bytes(image_id.encode("utf-8"))
+        Image.new("RGB", (40, 30), (120, 80, 40)).save(original, format="PNG")
         services.database.upsert_image(
             ImageRecord(
                 image_id=image_id,

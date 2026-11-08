@@ -11,15 +11,16 @@ from app.auth import AuthService
 from app.bot import build_application
 from app.config import DEFAULT_CONFIG_PATH, load_config
 from app.database import Database
-from app.inkypi_adapter import InkyPiAdapter
+from app.frame_display import FrameDisplay
 from app.logging_setup import configure_logging
 from app.models import AppServices
+from app.panel import make_panel
 from app.render import RenderService
 from app.storage import StorageService
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Telegram to InkyPi photo frame")
+    parser = argparse.ArgumentParser(description="Telegram e-paper photo frame")
     parser.add_argument("--config", default=None, help="Path to config.yaml")
     parser.add_argument("--log-level", default="INFO", help="Python logging level")
     return parser.parse_args()
@@ -52,8 +53,19 @@ def main() -> None:
         auth=AuthService(database),
         storage=storage,
         renderer=RenderService(config.display),
-        display=InkyPiAdapter(config.inkypi, config.storage, config.display, database=database),
+        display=FrameDisplay(
+            make_panel(config.display, work_dir=config.storage.inkypi_payload_dir),
+            config.storage,
+            config.display,
+            database,
+            legacy_inkypi_device_paths=config.legacy_inkypi_device_paths,
+        ),
     )
+    panel_ok, panel_description = services.display.panel_status()
+    if panel_ok:
+        logger.info("Display panel: %s", panel_description)
+    else:
+        logger.warning("Display panel not ready: %s", panel_description)
 
     logger.info("Starting Telegram photo frame bot")
     logger.info("Pending Telegram updates will be preserved across restarts")

@@ -11,12 +11,10 @@ from app.models import (
     AppConfig,
     DatabaseConfig,
     DisplayConfig,
-    InkyPiConfig,
     SecurityConfig,
     StorageConfig,
     TelegramConfig,
 )
-from app.inkypi_paths import DEFAULT_INSTALL_PATH
 
 
 class ConfigError(ValueError):
@@ -26,11 +24,14 @@ class ConfigError(ValueError):
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
-DEFAULT_UPDATE_METHOD = "http_update_now"
-DEFAULT_UPDATE_NOW_URL = "http://127.0.0.1/update_now"
-DEFAULT_UPDATE_NOW_TIMEOUT_SECONDS = 120
-DEFAULT_REFRESH_COMMAND_TIMEOUT_SECONDS = 150
-LEGACY_RESTART_REFRESH_COMMAND = "sudo systemctl restart inkypi.service"
+PANEL_TYPES = ("waveshare", "file")
+DEFAULT_WAVESHARE_MODEL = "epd7in3e"
+DEFAULT_DRIVER_DIR = "vendor/waveshare_epd"
+DEFAULT_REFRESH_TIMEOUT_SECONDS = 300
+DEFAULT_PANEL_OUTPUT_PATH = "data/panel.png"
+# Where older versions of this project installed InkyPi.
+LEGACY_INKYPI_INSTALL_PATH = "/usr/local/inkypi"
+LEGACY_INKYPI_REPO_PATH = "~/InkyPi"
 LEGACY_CAPTION_HEIGHT = 132
 LEGACY_CAPTION_FONT_SIZE = 28
 LEGACY_MAX_CAPTION_LINES = 2
@@ -111,6 +112,17 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         metadata_font_size_value = DEFAULT_METADATA_FONT_SIZE
         caption_font_size_value = DEFAULT_CAPTION_FONT_SIZE
 
+    # Before InkyPi was removed, the panel model lived in the inkypi section.
+    inkypi_section = raw.get("inkypi") or {}
+    panel = str(display_section.get("panel", "waveshare")).strip().lower()
+    if panel not in PANEL_TYPES:
+        errors.append(f"display.panel must be one of: {', '.join(PANEL_TYPES)}.")
+    waveshare_model = str(
+        display_section.get("waveshare_model")
+        or inkypi_section.get("waveshare_model")
+        or DEFAULT_WAVESHARE_MODEL
+    ).strip()
+
     display_config = DisplayConfig(
         width=_parse_positive_int(display_section.get("width", 800), "display.width", errors),
         height=_parse_positive_int(display_section.get("height", 480), "display.height", errors),
@@ -125,48 +137,25 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         ),
         font_path=str(display_section.get("font_path", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")),
         text_color=str(display_section.get("text_color", "#111111")),
+        panel=panel,
+        waveshare_model=waveshare_model,
+        driver_dir=_resolve_path(display_section.get("driver_dir", DEFAULT_DRIVER_DIR)),
+        clear_before_display=_parse_bool(
+            display_section.get("clear_before_display", True),
+            "display.clear_before_display",
+            errors,
+        ),
+        refresh_timeout_seconds=_parse_positive_int(
+            display_section.get("refresh_timeout_seconds", DEFAULT_REFRESH_TIMEOUT_SECONDS),
+            "display.refresh_timeout_seconds",
+            errors,
+        ),
+        panel_output_path=_resolve_path(display_section.get("panel_output_path", DEFAULT_PANEL_OUTPUT_PATH)),
     )
     if display_config.caption_height >= display_config.height:
         errors.append("display.caption_height must be smaller than display.height.")
 
-    inkypi_section = raw.get("inkypi", {})
-    refresh_command = str(inkypi_section.get("refresh_command", "")).strip()
-    raw_update_method = str(inkypi_section.get("update_method", "")).strip()
-    if raw_update_method:
-        update_method = raw_update_method
-    elif not refresh_command or refresh_command == LEGACY_RESTART_REFRESH_COMMAND:
-        update_method = DEFAULT_UPDATE_METHOD
-    else:
-        update_method = "command"
-
-    if update_method not in {"http_update_now", "command"}:
-        errors.append("inkypi.update_method must be 'http_update_now' or 'command'.")
-
-    update_now_url = str(inkypi_section.get("update_now_url", DEFAULT_UPDATE_NOW_URL)).strip()
-    if update_method == "http_update_now" and not update_now_url:
-        errors.append("inkypi.update_now_url is required when inkypi.update_method is 'http_update_now'.")
-    if update_method == "command" and not refresh_command:
-        errors.append("inkypi.refresh_command is required when inkypi.update_method is 'command'.")
-    inkypi_config = InkyPiConfig(
-        repo_path=_resolve_path(inkypi_section.get("repo_path", "~/InkyPi")),
-        install_path=_resolve_path(inkypi_section.get("install_path", str(DEFAULT_INSTALL_PATH))),
-        validated_commit=str(inkypi_section.get("validated_commit", "main")),
-        waveshare_model=str(inkypi_section.get("waveshare_model", "epd7in3e")),
-        plugin_id=str(inkypi_section.get("plugin_id", "telegram_frame")),
-        update_method=update_method,
-        update_now_url=update_now_url,
-        refresh_command=refresh_command,
-        update_now_timeout_seconds=_parse_positive_int(
-            inkypi_section.get("update_now_timeout_seconds", DEFAULT_UPDATE_NOW_TIMEOUT_SECONDS),
-            "inkypi.update_now_timeout_seconds",
-            errors,
-        ),
-        refresh_command_timeout_seconds=_parse_positive_int(
-            inkypi_section.get("refresh_command_timeout_seconds", DEFAULT_REFRESH_COMMAND_TIMEOUT_SECONDS),
-            "inkypi.refresh_command_timeout_seconds",
-            errors,
-        ),
-    )
+    legacy_device_paths = _legacy_inkypi_device_paths(inkypi_section)
 
     if errors:
         raise ConfigError("\n".join(errors))
@@ -180,7 +169,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         database=DatabaseConfig(path=database_path),
         storage=storage_config,
         display=display_config,
-        inkypi=inkypi_config,
+        legacy_inkypi_device_paths=legacy_device_paths,
     )
 
 
@@ -190,6 +179,32 @@ def _resolve_path(value: Any) -> Path:
     if path.is_absolute():
         return path
     return PROJECT_ROOT / path
+
+
+def _legacy_inkypi_device_paths(inkypi_section: dict[str, Any]) -> tuple[Path, ...]:
+    """Candidate locations of an old InkyPi device.json, most specific first."""
+    install_paths = [inkypi_section.get("install_path"), LEGACY_INKYPI_INSTALL_PATH]
+    repo_paths = [inkypi_section.get("repo_path"), LEGACY_INKYPI_REPO_PATH]
+    candidates: list[Path] = []
+    for base in [*install_paths, *repo_paths]:
+        if not base:
+            continue
+        path = _resolve_path(base) / "src" / "config" / "device.json"
+        if path not in candidates:
+            candidates.append(path)
+    return tuple(candidates)
+
+
+def _parse_bool(value: Any, field_name: str, errors: list[str]) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "yes", "on", "1"}:
+        return True
+    if text in {"false", "no", "off", "0"}:
+        return False
+    errors.append(f"{field_name} must be true or false.")
+    return True
 
 
 def _parse_int_list(value: Any, field_name: str, errors: list[str]) -> list[int]:

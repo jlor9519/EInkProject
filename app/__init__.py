@@ -1,2 +1,1 @@
-"""Telegram-to-InkyPi photo frame application."""
-
+"""Telegram e-paper photo frame application."""

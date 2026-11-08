@@ -9,13 +9,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import load_config
-from app.inkypi_adapter import InkyPiAdapter
+from app.database import Database
+from app.frame_display import FrameDisplay
 from app.models import DisplayRequest
+from app.panel import make_panel
 from app.storage import StorageService
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Manual InkyPi display hook")
+    parser = argparse.ArgumentParser(description="Show an image on the frame by hand")
     parser.add_argument("--config", default=None, help="Path to config.yaml")
     parser.add_argument("--image", help="Path to a composed bridge image")
     parser.add_argument("--original", help="Path to the original image", default="")
@@ -32,7 +34,15 @@ def main() -> None:
     config = load_config(args.config)
     storage = StorageService(config.storage)
     storage.ensure_directories()
-    display = InkyPiAdapter(config.inkypi, config.storage, config.display)
+    database = Database(config.database.path)
+    database.initialize()
+    display = FrameDisplay(
+        make_panel(config.display, work_dir=config.storage.inkypi_payload_dir),
+        config.storage,
+        config.display,
+        database,
+        legacy_inkypi_device_paths=config.legacy_inkypi_device_paths,
+    )
 
     if args.refresh_only:
         result = display.refresh_only()

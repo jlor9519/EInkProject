@@ -1,85 +1,104 @@
-# Telegram-to-InkyPi Photo Frame
+# Telegram E-Paper Photo Frame
 
-This project turns a Raspberry Pi Zero 2 W and a Waveshare 7.3 inch Spectra 6 display into a remotely controlled photo frame.
+This project turns a Raspberry Pi Zero 2 W or Pi Zero W and a Waveshare 7.3 inch Spectra 6 display into a remotely controlled photo frame.
 
-The companion app in this repository handles:
+The app in this repository handles:
 
 - Telegram bot polling and conversations
 - whitelist and admin access control
-- SQLite persistence for users and image history
-- local storage for originals, rendered bridge images, and current InkyPi payload
+- SQLite persistence for users, image history and frame settings
+- local storage for originals, prepared images and the current image
+- drawing the frame (photo plus caption bar) and sending it to the panel through Waveshare's own driver
 - setup automation and systemd integration
 
-InkyPi remains the display backend. During setup, this project injects a custom InkyPi plugin into a cloned InkyPi checkout so that panel-specific image handling stays on the InkyPi side.
-
-By default, the setup expects the standard upstream InkyPi layout:
-
-- source checkout: `~/InkyPi`
-- runtime install path: `/usr/local/inkypi`
-- active source tree: `/usr/local/inkypi/src`, which resolves back to the checkout `src/` directory
+Earlier versions used [InkyPi](https://github.com/fatihak/InkyPi) as the display backend. That is no longer needed; see [Migrating a frame that still uses InkyPi](#migrating-a-frame-that-still-uses-inkypi).
 
 ## High-level flow
 
 1. A whitelisted user sends a photo to the Telegram bot.
 2. The bot asks for location, date, and caption.
-3. The app saves the original photo and metadata locally.
-4. The app renders a captioned RGB bridge image and writes a canonical bridge payload.
-5. The app triggers InkyPi, using the local `update_now` HTTP endpoint first when configured and
-   falling back to the configured refresh command if the HTTP refresh hangs or is unreachable.
-   In `http_update_now` mode, a recovery command only counts as success after a verified follow-up
-   refresh is accepted by InkyPi again.
-6. The custom InkyPi plugin reads the bridge payload and returns a `PIL.Image` for display.
-7. The app stores the result in SQLite.
+3. The app saves the original photo and metadata locally, plus a prepared copy sized for the panel.
+4. The app draws the frame image, rotates it for the frame's orientation and applies the colour tuning.
+5. A short-lived child process sends the image to the panel. It is stopped after
+   `display.refresh_timeout_seconds` if the panel hangs, so the bot never gets stuck.
+6. Only once the panel accepted the image does it become the current image. A failed refresh leaves the previous image in place.
 
 ## Layout
 
 ```text
-app/                         Python companion app
-config/                      Example config and systemd unit
-integrations/inkypi_plugin/  Injected InkyPi plugin source
-scripts/                     Install, update, and debug helpers
-tests/                       Unit tests for core behavior
+app/        Python app (bot, frame drawing, panel output)
+config/     Example config and systemd unit
+scripts/    Install, update, and debug helpers
+tests/      Unit tests
+vendor/     Waveshare driver, downloaded by the install/update scripts (not in git)
 ```
 
 ## Prerequisites
 
-Before setting up, you will need:
-
-- A **Telegram bot token** from [@BotFather](https://t.me/BotFather)
+- A Raspberry Pi Zero 2 W or Pi Zero W with **Raspberry Pi OS Lite**. The Pi Zero W only runs the **32-bit** version; Raspberry Pi Imager offers the right one when you pick the board.
+- A **Telegram bot token** from [@BotFather](https://t.me/BotFather). Each frame needs **its own bot**: Telegram delivers a bot's messages to only one device, so two frames sharing a token keep interrupting each other.
 - Your **Telegram user ID** (send `/start` to [@userinfobot](https://t.me/userinfobot) to find it)
 
 ## Setup
 
-1. Enable SPI (required for the e-ink display):
-   ```bash
-   sudo raspi-config nonint do_spi 0
-   ```
-2. Clone this repository and run the installer:
+1. Clone this repository and run the installer:
    ```bash
    git clone https://github.com/jlor9519/EInkProject.git && cd ~/EInkProject
    bash scripts/install.sh
    ```
    Run the installer as your normal user, not with `sudo`. The script uses `sudo` internally
    for apt and systemd when needed.
-3. Have these ready before you start:
-   - Telegram bot token
-   - your Telegram user ID
+2. The installer installs the apt packages, downloads the Waveshare driver, enables SPI and adds
+   your user to the `spi` and `gpio` groups. If SPI was off, it asks you to **reboot** once; the
+   photo frame starts by itself after the reboot.
+
+On a Pi Zero W the first install takes a while, but nothing has to be compiled: Pillow, PyYAML
+and the GPIO/SPI libraries come prebuilt from apt.
 
 ### Validate the install
-
-After the installer finishes:
 
 1. Check the service:
    ```bash
    systemctl status photo-frame.service
    ```
-2. In Telegram, run `/myid` and `/status`, then send one test photo.
+2. In Telegram, run `/myid` and `/status`, then send one test photo. `/status` shows a
+   `Display:` line; `✗ … Treiber fehlt` means the Waveshare driver was not downloaded (rerun `scripts/update.sh`).
 3. Confirm your Telegram user ID is both an admin and whitelisted. If those values were entered
    incorrectly, the bot may start but reject your uploads.
 
 ### Updating
 
-Run `bash scripts/update.sh` to pull the latest changes and restart the service.
+Run `bash scripts/update.sh` to pull the latest changes and restart the service. `--quick` skips
+the apt packages; `--clear-images` removes all stored images.
+
+### Migrating a frame that still uses InkyPi
+
+On a frame set up with an older version, update in this order:
+
+```bash
+cd ~/EInkProject
+git pull
+bash scripts/update.sh
+```
+
+Run `git pull` by itself first. The old `update.sh` would otherwise keep running its own outdated
+steps after pulling the new version.
+
+The update then:
+
+- installs the panel libraries from apt and downloads the Waveshare driver into `vendor/`,
+- turns off `inkypi.service`, so only the photo frame uses the panel,
+- restarts the photo frame, which imports orientation, colour tuning, slideshow interval and quiet
+  hours once from InkyPi's `device.json`.
+
+InkyPi's files are left in place, so you can go back by checking out the previous version and running
+`sudo systemctl enable --now inkypi.service`. Once everything works, remove InkyPi with:
+
+```bash
+sudo rm -rf ~/InkyPi /usr/local/inkypi
+sudo rm -f /etc/systemd/system/inkypi.service /etc/sudoers.d/photo-frame-inkypi
+sudo systemctl daemon-reload
+```
 
 ### Uninstalling
 
@@ -92,24 +111,18 @@ To remove everything the installer set up:
    sudo rm /etc/systemd/system/photo-frame.service
    sudo systemctl daemon-reload
    ```
-2. Remove the sudoers file the installer created:
+2. Remove the sudoers file older versions created, if it is still there:
    ```bash
-   sudo rm -f /etc/sudoers.d/photo-frame-inkypi
    sudo rm -f /etc/sudoers.d/photo-frame-maintenance
    ```
 3. Delete the project directory (contains the app, config, database, and photos):
    ```bash
    rm -rf ~/EInkProject
    ```
-4. Optionally remove InkyPi if you no longer need it:
+4. Optionally remove the apt packages that were installed exclusively for this project:
    ```bash
-   sudo rm -rf ~/InkyPi
-   sudo rm -rf /usr/local/inkypi
-   ```
-   `sudo` is needed because InkyPi's service runs as root and creates `__pycache__` files owned by root inside the checkout.
-5. Optionally remove the apt packages that were installed exclusively for this project:
-   ```bash
-   sudo apt-get remove --autoremove python3-venv python3-pip fonts-dejavu-core
+   sudo apt-get remove --autoremove python3-venv python3-pip fonts-dejavu-core \
+     python3-pil python3-yaml python3-spidev python3-gpiozero python3-lgpio
    ```
    Skip this step if you use those packages for other things.
 
@@ -121,22 +134,27 @@ If you want to rehearse the shell prompt flow on a development machine without t
 bash scripts/mock_install.sh
 ```
 
-That mock flow writes its state under `mock-installation/`, injects the plugin into a fake InkyPi checkout, and skips privileged system changes.
+That mock flow writes its state under `mock-installation/` and skips privileged system changes.
 
-If you want to test only the Telegram bot flow on a development machine in the foreground, run:
+If you want to test the Telegram bot flow on a development machine in the foreground, run:
 
 ```bash
 bash scripts/test_telegram_bot.sh
 ```
 
-That runner uses isolated state under `telegram-bot-test/`, mocks display refresh with `echo`, and stops the bot as soon as you end the script with `Ctrl-C` or close the terminal.
+That runner uses isolated state under `telegram-bot-test/` and a simulated panel: every refresh
+writes `telegram-bot-test/data/panel.png`, rotated and colour-tuned exactly as the real panel
+would receive it. Stop the bot with `Ctrl-C` or by closing the terminal.
+
+Run the tests with `.venv/bin/python -m pytest`.
 
 ## Notes
 
-- The default Waveshare model is set to `epd7in3e`, which matches the Waveshare 7.3 inch E6 documentation.
+- Panel settings live in the `display` section of `config/config.yaml`:
+  - `waveshare_model` (default `epd7in3e`, the Waveshare 7.3 inch E6) picks the driver that is downloaded.
+  - `clear_before_display` (default `true`) wipes the panel to white before each image. That avoids
+    ghosting but doubles the refresh time; set it to `false` to try faster refreshes.
+  - `refresh_timeout_seconds` (default `300`) is how long one refresh may take before it is stopped.
+  - `panel: file` writes the panel image to `panel_output_path` instead of driving a panel.
+- Orientation, colour tuning, slideshow interval and quiet hours are changed in the bot's `/settings` menu and stored in the database.
 - The default render size is `800x480`.
-- The default InkyPi source checkout path is `~/InkyPi`, and the default runtime install path is `/usr/local/inkypi`.
-- `inkypi.refresh_command` is used as the primary trigger in `command` mode and as the automatic recovery fallback when `http_update_now` is configured but the local HTTP refresh path is unhealthy.
-- `inkypi.update_now_timeout_seconds` and `inkypi.refresh_command_timeout_seconds` can be increased for slow e-paper panels such as the Waveshare `epd7in3e`.
-- The default fallback `sudo systemctl restart inkypi.service` is treated as a recovery action in `http_update_now` mode. If the panel likely updated during recovery but HTTP verification stays too slow, the app keeps the new image as current and marks it as unverified in `/status` and `/list`.
-- Exact InkyPi refresh behavior is intentionally configurable because the validated local command may differ between installations.

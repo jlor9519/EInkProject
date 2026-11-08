@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 DISPLAY_VERIFICATION_VERIFIED = "verified"
+# Only set by older versions that drove the panel through InkyPi; may still be stored as the
+# state of the current image.
 DISPLAY_VERIFICATION_ASSUMED_AFTER_RECOVERY = "assumed_after_recovery"
 DISPLAY_VERIFICATION_FAILED = "failed"
 
@@ -46,20 +50,14 @@ class DisplayConfig:
     caption_character_limit: int
     font_path: str
     text_color: str
-
-
-@dataclass(slots=True)
-class InkyPiConfig:
-    repo_path: Path
-    install_path: Path
-    validated_commit: str
-    waveshare_model: str
-    plugin_id: str
-    update_method: str
-    update_now_url: str
-    refresh_command: str
-    update_now_timeout_seconds: int = 120
-    refresh_command_timeout_seconds: int = 150
+    # "waveshare" drives the e-paper panel; "file" writes the panel image to panel_output_path.
+    panel: str = "waveshare"
+    waveshare_model: str = "epd7in3e"
+    driver_dir: Path = PROJECT_ROOT / "vendor" / "waveshare_epd"
+    # Wipe the panel to white before drawing, which avoids ghosting but doubles the refresh time.
+    clear_before_display: bool = True
+    refresh_timeout_seconds: int = 300
+    panel_output_path: Path = PROJECT_ROOT / "data" / "panel.png"
 
 
 @dataclass(slots=True)
@@ -69,7 +67,8 @@ class AppConfig:
     database: DatabaseConfig
     storage: StorageConfig
     display: DisplayConfig
-    inkypi: InkyPiConfig
+    # device.json files of an old InkyPi install; their settings are imported once.
+    legacy_inkypi_device_paths: tuple[Path, ...] = ()
 
 
 @dataclass(slots=True)
@@ -137,7 +136,6 @@ class DeviceSettingsApplyResult:
     success: bool
     message: str
     confirmed_settings: dict[str, Any]
-    device_config_path: Path | None = None
 
 
 @dataclass(slots=True)

@@ -6,8 +6,6 @@ TEST_STATE_DIR="${PROJECT_ROOT}/telegram-bot-test"
 TEST_CONFIG_FILE="${TEST_STATE_DIR}/config.yaml"
 TEST_ENV_FILE="${TEST_STATE_DIR}/.env"
 TEST_DATA_DIR="${TEST_STATE_DIR}/data"
-TEST_INKYPI_DIR="${TEST_STATE_DIR}/InkyPi"
-TEST_RUNTIME_DIR="${TEST_STATE_DIR}/usr/local/inkypi"
 TEST_VENV_DIR="${TEST_STATE_DIR}/.venv"
 
 mkdir -p \
@@ -15,12 +13,7 @@ mkdir -p \
   "${TEST_DATA_DIR}/incoming" \
   "${TEST_DATA_DIR}/rendered" \
   "${TEST_DATA_DIR}/db" \
-  "${TEST_DATA_DIR}/inkypi" \
-  "${TEST_INKYPI_DIR}/src/plugins" \
-  "${TEST_INKYPI_DIR}/src/config" \
-  "${TEST_RUNTIME_DIR}"
-
-ln -snf "${TEST_INKYPI_DIR}/src" "${TEST_RUNTIME_DIR}/src"
+  "${TEST_DATA_DIR}/inkypi"
 
 cat > "${TEST_CONFIG_FILE}" <<EOF
 telegram:
@@ -50,17 +43,9 @@ display:
   caption_font_size: 28
   font_path: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
   text_color: "#111111"
+  panel: file
+  panel_output_path: ${TEST_DATA_DIR}/panel.png
 
-inkypi:
-  repo_path: ${TEST_INKYPI_DIR}
-  install_path: ${TEST_RUNTIME_DIR}
-  validated_commit: test-mode
-  waveshare_model: epd7in3e
-  plugin_id: telegram_frame
-  payload_dir: ${TEST_DATA_DIR}/inkypi
-  update_method: command
-  update_now_url: http://127.0.0.1/update_now
-  refresh_command: echo telegram-test-refresh
 EOF
 
 cat > "${TEST_ENV_FILE}" <<EOF
@@ -101,7 +86,8 @@ Useful commands to try in Telegram:
 - /whitelist <user_id>
 
 You can also send a photo and walk through the full metadata flow.
-Display refresh is mocked with: echo telegram-test-refresh
+The panel is simulated: each refresh writes ${TEST_DATA_DIR}/panel.png
+(rotated and colour-tuned exactly as the real panel would receive it).
 
 Stop the bot with Ctrl-C or by closing this terminal.
 EOF

@@ -26,7 +26,7 @@ CURRENT_IMAGE_VERIFICATION_DETAIL_KEY = "current_image_verification_detail"
 # retrying the same image forever.
 ROTATION_SKIP_FROM_KEY = "rotation_skip_from_image_id"
 # A new image whose display fails goes back into the waiting queue. Retries happen about once
-# a minute, so this tolerates roughly half an hour of InkyPi being unavailable before giving up.
+# a minute, so this tolerates roughly half an hour of the panel being unavailable before giving up.
 MAX_NEW_IMAGE_DISPLAY_ATTEMPTS = 30
 
 

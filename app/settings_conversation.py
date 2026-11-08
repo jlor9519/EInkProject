@@ -51,7 +51,7 @@ SETTINGS_CALLBACK_PREFIX = "settings|"
 @dataclass(slots=True)
 class _SettingDef:
     label: str
-    key: str               # top-level key in device.json, or db setting key
+    key: str               # frame setting key, or db setting key
     subkey: str | None     # key inside image_settings, or None
     kind: str              # "image_tuning" | "orientation" | "fit_mode" | "integer" | "interval" | "sleep_schedule"
 
@@ -525,10 +525,15 @@ async def _show_image_tuning_prompt(
     return WAITING_FOR_SETTINGS_VALUE
 
 
-async def _run_device_change(context: ContextTypes.DEFAULT_TYPE, func, *args, **kwargs):
-    """Run a blocking InkyPi settings change (restart + refresh) off the event loop.
+def _notice(*parts: str) -> str:
+    """Join the non-empty parts of a settings notice, one per line."""
+    return "\n".join(part for part in parts if part)
 
-    Holds the display lock so it cannot restart InkyPi in the middle of another display update.
+
+async def _run_device_change(context: ContextTypes.DEFAULT_TYPE, func, *args, **kwargs):
+    """Run a blocking frame settings change (which may redraw the panel) off the event loop.
+
+    Holds the display lock so it cannot redraw the panel in the middle of another display update.
     """
     async with get_display_lock(context):
         return await asyncio.to_thread(func, *args, **kwargs)
@@ -846,9 +851,8 @@ async def _save_image_tuning(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if key in draft:
                 draft[key] = _normalize_tuning_value(value)
 
-    path_note = f" (device.json: {result.device_config_path})" if result.device_config_path else ""
     status_prefix = "Bildoptimierung wurde gespeichert" if result.success else "Bildoptimierung wurde teilweise gespeichert"
-    return await _show_settings_menu(update, context, notice=f"{status_prefix}{path_note}.\n{result.message}")
+    return await _show_settings_menu(update, context, notice=_notice(f"{status_prefix}.", result.message))
 
 
 async def _apply_setting_value(
@@ -913,19 +917,18 @@ async def _apply_setting_value(
             return WAITING_FOR_SETTINGS_VALUE
 
         orientation_label = format_orientation_label(orientation)
-        path_note = f" (device.json: {result.device_config_path})" if result.device_config_path else ""
         if not result.success:
             return await _show_settings_menu(
                 update,
                 context,
-                notice=f"{s.label} wurde als {orientation_label} gespeichert{path_note}.\n{result.message}",
+                notice=_notice(f"{s.label} wurde als {orientation_label} gespeichert.", result.message),
             )
 
         _, switch_message = await _switch_orientation_library(context, orientation)
         return await _show_settings_menu(
             update,
             context,
-            notice=f"{s.label} ist jetzt {orientation_label}{path_note}.\n{switch_message}\n{result.message}",
+            notice=_notice(f"{s.label} ist jetzt {orientation_label}.", switch_message, result.message),
         )
 
     if s.kind == "fit_mode":
@@ -982,7 +985,7 @@ async def _apply_setting_value(
                 await _respond_settings_message(update, f"Fehler beim Speichern: {exc}")
                 return WAITING_FOR_SETTINGS_VALUE
             status = "Ruhezeit ist deaktiviert" if result.success else "Ruhezeit wurde deaktiviert"
-            return await _show_settings_menu(update, context, notice=f"{status}.\n{result.message}")
+            return await _show_settings_menu(update, context, notice=_notice(f"{status}.", result.message))
 
         normalized = text.replace("–", "-").replace("—", "-")
         parts = normalized.split("-", 1)
@@ -1019,7 +1022,7 @@ async def _apply_setting_value(
             status = f"Ruhezeit ist jetzt {sleep_start}–{wake_up}. Das Display wechselt das Bild in dieser Zeit nicht"
         else:
             status = f"Ruhezeit wurde als {sleep_start}–{wake_up} gespeichert"
-        return await _show_settings_menu(update, context, notice=f"{status}.\n{result.message}")
+        return await _show_settings_menu(update, context, notice=_notice(f"{status}.", result.message))
 
     if s.kind == "interval":
         seconds = _parse_interval_input(text)
@@ -1054,7 +1057,7 @@ async def _apply_setting_value(
             if not scheduled
             else f"\nHinweis: Täglicher Bildwechsel um {scheduled} ist aktiv und überschreibt diese Anzeigedauer momentan."
         )
-        return await _show_settings_menu(update, context, notice=f"{status}.{note}\n{result.message}")
+        return await _show_settings_menu(update, context, notice=_notice(f"{status}.{note}", result.message))
 
     if s.kind == "scheduled_time":
         if text in ("keine", "kein", "no", "off", "deaktivieren", "deaktiviert"):
@@ -1126,7 +1129,7 @@ async def _settings_image_while_busy(update: Update, context: ContextTypes.DEFAU
 
 
 async def _settings_busy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Answer input that arrives while a setting is still being applied (InkyPi restart)."""
+    """Answer input that arrives while a setting is still being applied (panel refresh)."""
     if update.callback_query is not None:
         await _safe_answer(update.callback_query, _SETTINGS_BUSY_TEXT)
     elif update.effective_message is not None:
@@ -1183,6 +1186,6 @@ def build_settings_conversation() -> ConversationHandler:
         name="settings",
         persistent=False,
         conversation_timeout=120,
-        # Applying a setting can take minutes (InkyPi restart + refresh); don't hold up other users.
+        # Applying a setting can take minutes (panel refresh); don't hold up other users.
         block=False,
     )

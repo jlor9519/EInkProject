@@ -12,9 +12,15 @@ PROMPT_MODE="${PROMPT_MODE:-interactive}"
 MOCK_INSTALL="${MOCK_INSTALL:-0}"
 MOCK_STATE_DIR="${MOCK_STATE_DIR:-${PROJECT_ROOT}/mock-installation}"
 MOCK_SKIP_PIP="${MOCK_SKIP_PIP:-0}"
-LEGACY_INKYPI_REFRESH_COMMAND="sudo systemctl restart inkypi.service"
-DEFAULT_INKYPI_UPDATE_METHOD="http_update_now"
-DEFAULT_INKYPI_UPDATE_NOW_URL="http://127.0.0.1/update_now"
+DEFAULT_WAVESHARE_MODEL="epd7in3e"
+WAVESHARE_DRIVER_BASE_URL="https://raw.githubusercontent.com/waveshareteam/e-Paper/master/RaspberryPi_JetsonNano/python/lib/waveshare_epd"
+# python3-pil/-yaml come from apt so pip does not have to compile them on a Pi Zero; spidev,
+# gpiozero and lgpio are what the Waveshare driver needs. The venv sees them via
+# --system-site-packages.
+SYSTEM_PACKAGES=(
+  python3 python3-venv python3-pip git curl fonts-dejavu-core
+  python3-pil python3-yaml python3-spidev python3-gpiozero python3-lgpio
+)
 export CONFIG_FILE
 export ENV_FILE
 export PHOTO_FRAME_CONFIG="${PHOTO_FRAME_CONFIG:-${CONFIG_FILE}}"
@@ -68,92 +74,6 @@ systemd_unit_exists() {
 }
 
 
-detect_inkypi_repo_from_service() {
-  local unit_name="${1:-inkypi.service}"
-  if [[ "${MOCK_INSTALL}" == "1" ]]; then
-    return 0
-  fi
-  if ! systemd_unit_exists "${unit_name}"; then
-    return 0
-  fi
-  systemctl cat "${unit_name}" 2>/dev/null | python3 - <<'PY'
-import os
-import re
-import sys
-
-text = sys.stdin.read()
-
-working_dir_match = re.search(r"^WorkingDirectory=(.+)$", text, re.MULTILINE)
-if working_dir_match:
-    working_dir = os.path.abspath(os.path.expanduser(working_dir_match.group(1).strip()))
-    if working_dir.endswith("/src"):
-        print(os.path.dirname(working_dir))
-        raise SystemExit(0)
-    if os.path.basename(working_dir) == "InkyPi" or os.path.exists(os.path.join(working_dir, "src", "inkypi.py")):
-        print(working_dir)
-        raise SystemExit(0)
-
-exec_match = re.search(r"(/[^ \n\"']+/src/inkypi\.py)", text)
-if exec_match:
-    inkypi_py = os.path.abspath(os.path.expanduser(exec_match.group(1)))
-    print(os.path.dirname(os.path.dirname(inkypi_py)))
-PY
-}
-
-
-resolve_inkypi_layout_values() {
-  local configured_repo_path="${1:-}"
-  local configured_install_path="${2:-}"
-  python3 - "${configured_repo_path}" "${configured_install_path}" <<'PY'
-import sys
-
-from app.inkypi_paths import resolve_inkypi_layout
-
-repo_arg = sys.argv[1] if len(sys.argv) > 1 else ""
-install_arg = sys.argv[2] if len(sys.argv) > 2 else ""
-layout = resolve_inkypi_layout(repo_arg or None, install_arg or None)
-
-print(layout.repo_path)
-print(layout.install_path)
-print(layout.source_root)
-print(layout.device_config_path)
-print(layout.git_sync_path or "")
-print(layout.source_origin)
-print("1" if layout.replaced_stale_repo_path else "0")
-print("1" if layout.install_src_exists else "0")
-PY
-}
-
-
-resolve_inkypi_update_values() {
-  local configured_method="${1:-}"
-  local configured_update_now_url="${2:-}"
-  local configured_refresh_command="${3:-}"
-
-  local update_method="${configured_method}"
-  local update_now_url="${configured_update_now_url}"
-  local refresh_command="${configured_refresh_command}"
-
-  if [[ -z "${update_method}" ]]; then
-    if [[ -z "${refresh_command}" || "${refresh_command}" == "${LEGACY_INKYPI_REFRESH_COMMAND}" ]]; then
-      update_method="${DEFAULT_INKYPI_UPDATE_METHOD}"
-    else
-      update_method="command"
-    fi
-  fi
-
-  if [[ -z "${update_now_url}" ]]; then
-    update_now_url="${DEFAULT_INKYPI_UPDATE_NOW_URL}"
-  fi
-
-  if [[ -z "${refresh_command}" ]]; then
-    refresh_command="${LEGACY_INKYPI_REFRESH_COMMAND}"
-  fi
-
-  printf '%s\n%s\n%s\n' "${update_method}" "${update_now_url}" "${refresh_command}"
-}
-
-
 ensure_systemd_service_active() {
   local unit_name="$1"
   if [[ "${MOCK_INSTALL}" == "1" ]]; then
@@ -173,70 +93,6 @@ ensure_systemd_service_active() {
   echo >&2 "Recent journal output:"
   sudo journalctl -u "${unit_name}" -n 50 --no-pager || true
   return 1
-}
-
-
-ensure_inkypi_service_reload_sudoers() {
-  local service_user="$1"
-  local systemctl_bin
-  systemctl_bin="$(command -v systemctl || true)"
-  if [[ -z "${systemctl_bin}" ]]; then
-    echo >&2 "systemctl was not found; cannot install scoped sudoers access for inkypi.service."
-    return 1
-  fi
-
-  if [[ "${MOCK_INSTALL}" == "1" ]]; then
-    echo "[mock sudo] install scoped sudoers access for ${service_user} using ${systemctl_bin}"
-    return 0
-  fi
-
-  local tmp_file
-  tmp_file="$(mktemp)"
-  cat >"${tmp_file}" <<EOF
-# Managed by EInkProject installer
-${service_user} ALL=(root) NOPASSWD: ${systemctl_bin} restart inkypi.service, ${systemctl_bin} is-active inkypi.service
-EOF
-
-  chmod 440 "${tmp_file}"
-  run_privileged install -m 440 "${tmp_file}" /etc/sudoers.d/photo-frame-inkypi
-  rm -f "${tmp_file}"
-
-  local visudo_bin
-  visudo_bin="$(command -v visudo || true)"
-  if [[ -n "${visudo_bin}" ]]; then
-    run_privileged "${visudo_bin}" -cf /etc/sudoers.d/photo-frame-inkypi >/dev/null
-  fi
-}
-
-
-expand_path() {
-  python3 - "$1" <<'PY'
-import os
-import sys
-
-raw = sys.argv[1]
-print(os.path.abspath(os.path.expandvars(os.path.expanduser(raw))))
-PY
-}
-
-
-path_parent_is_writable() {
-  local target
-  target="$(expand_path "$1")"
-  local parent
-  parent="$(dirname "${target}")"
-  [[ -w "${parent}" ]]
-}
-
-
-path_is_writable_or_creatable() {
-  local target
-  target="$(expand_path "$1")"
-  if [[ -e "${target}" ]]; then
-    [[ -w "${target}" ]]
-    return
-  fi
-  path_parent_is_writable "${target}"
 }
 
 
@@ -284,7 +140,14 @@ ensure_runtime_files() {
 
 ensure_venv() {
   if [[ ! -x "${RUN_PYTHON}" ]]; then
-    python3 -m venv "${VENV_DIR}"
+    if [[ "${MOCK_INSTALL}" == "1" ]]; then
+      python3 -m venv "${VENV_DIR}"
+    else
+      python3 -m venv --system-site-packages "${VENV_DIR}"
+    fi
+  fi
+  if [[ "${MOCK_INSTALL}" != "1" ]]; then
+    ensure_venv_sees_system_packages
   fi
   if [[ ! -x "${RUN_PYTHON}" ]]; then
     echo >&2 "Virtualenv creation did not produce ${RUN_PYTHON}."
@@ -550,21 +413,193 @@ PY
 }
 
 
-# Start the bot after InkyPi on boot (ordering only, no hard dependency). Installed as a drop-in so an
-# existing photo-frame.service unit is not overwritten on update.
-ensure_service_ordering() {
-  local dropin_dir="/etc/systemd/system/photo-frame.service.d"
-  local content=$'# Managed by EInkProject installer\n[Unit]\nAfter=inkypi.service'
+# A venv created before InkyPi was removed cannot see the apt packages (spidev, gpiozero, lgpio).
+# Switching the flag in pyvenv.cfg is what `python3 -m venv --system-site-packages` does, without
+# reinstalling everything.
+ensure_venv_sees_system_packages() {
+  local cfg="${VENV_DIR}/pyvenv.cfg"
+  if [[ -f "${cfg}" ]] && grep -q '^include-system-site-packages = false' "${cfg}"; then
+    echo "Letting ${VENV_DIR} use the system Python packages for the display."
+    sed -i.bak 's/^include-system-site-packages = false/include-system-site-packages = true/' "${cfg}"
+    rm -f "${cfg}.bak"
+  fi
+}
+
+
+install_system_packages() {
+  run_privileged apt-get update
+  run_privileged apt-get install -y "${SYSTEM_PACKAGES[@]}"
+}
+
+
+waveshare_model() {
+  local model
+  model="$(get_yaml_value display.waveshare_model string)"
+  if [[ -z "${model}" ]]; then
+    model="$(get_yaml_value inkypi.waveshare_model string)"
+  fi
+  printf '%s' "${model:-${DEFAULT_WAVESHARE_MODEL}}"
+}
+
+
+waveshare_driver_dir() {
+  local driver_dir
+  driver_dir="$(get_yaml_value display.driver_dir string)"
+  driver_dir="${driver_dir:-vendor/waveshare_epd}"
+  if [[ "${driver_dir}" != /* ]]; then
+    driver_dir="${PROJECT_ROOT}/${driver_dir}"
+  fi
+  printf '%s' "${driver_dir}"
+}
+
+
+# Download the Waveshare driver for the configured panel, unless it is already there.
+download_waveshare_drivers() {
+  local model driver_dir
+  model="$(waveshare_model)"
+  driver_dir="$(waveshare_driver_dir)"
+  local files=("${model}.py" "epdconfig.py")
+
   if [[ "${MOCK_INSTALL}" == "1" ]]; then
-    dropin_dir="${MOCK_STATE_DIR}/systemd/photo-frame.service.d"
-    mkdir -p "${dropin_dir}"
-    printf '%s\n' "${content}" > "${dropin_dir}/after-inkypi.conf"
-    echo "[mock] Wrote systemd drop-in to ${dropin_dir}/after-inkypi.conf"
+    for filename in "${files[@]}"; do
+      echo "[mock] curl ${WAVESHARE_DRIVER_BASE_URL}/${filename} -> ${driver_dir}/${filename}"
+    done
     return 0
   fi
-  run_privileged mkdir -p "${dropin_dir}"
-  printf '%s\n' "${content}" | sudo tee "${dropin_dir}/after-inkypi.conf" >/dev/null
-  run_privileged systemctl daemon-reload
+
+  mkdir -p "${driver_dir}"
+  for filename in "${files[@]}"; do
+    local dest_file="${driver_dir}/${filename}"
+    if [[ -s "${dest_file}" ]]; then
+      continue
+    fi
+    local tmp_file attempt=0 delay=5 success=0
+    tmp_file="$(mktemp)"
+    while (( attempt < 3 )); do
+      attempt=$((attempt + 1))
+      echo "Downloading Waveshare driver ${filename} (attempt ${attempt}/3)..."
+      if curl --silent --fail --location -o "${tmp_file}" "${WAVESHARE_DRIVER_BASE_URL}/${filename}" && [[ -s "${tmp_file}" ]]; then
+        success=1
+        break
+      fi
+      sleep "${delay}"
+      delay=$((delay * 2))
+    done
+    if [[ "${success}" != "1" ]]; then
+      rm -f "${tmp_file}"
+      echo >&2 "Could not download the Waveshare driver ${filename}."
+      echo >&2 "Check the network connection and that the model name exists at:"
+      echo >&2 "  https://github.com/waveshareteam/e-Paper/tree/master/RaspberryPi_JetsonNano/python/lib/waveshare_epd"
+      return 1
+    fi
+    mv "${tmp_file}" "${dest_file}"
+    chmod 644 "${dest_file}"
+  done
+  echo "Waveshare driver for ${model} is in ${driver_dir}."
+}
+
+
+boot_config_file() {
+  if [[ -f /boot/firmware/config.txt ]]; then
+    printf '%s' /boot/firmware/config.txt
+  elif [[ -f /boot/config.txt ]]; then
+    printf '%s' /boot/config.txt
+  fi
+}
+
+
+# Turn on SPI for the panel. Returns 0 if it was already on, 2 if a reboot is needed.
+ensure_spi_enabled() {
+  if [[ "${MOCK_INSTALL}" == "1" ]]; then
+    echo "[mock sudo] raspi-config nonint do_spi 0"
+    return 0
+  fi
+  local reboot_needed=0
+  if [[ ! -e /dev/spidev0.0 ]]; then
+    if command -v raspi-config >/dev/null 2>&1; then
+      echo "Enabling SPI for the e-paper panel."
+      run_privileged raspi-config nonint do_spi 0
+      reboot_needed=1
+    else
+      echo >&2 "SPI is not enabled and raspi-config is missing. Enable SPI by hand, then reboot."
+      return 2
+    fi
+  fi
+  # InkyPi set up the Waveshare HAT with both SPI chip-select lines; keep the same setup.
+  local boot_config
+  boot_config="$(boot_config_file)"
+  if [[ -n "${boot_config}" ]] && ! grep -q '^dtoverlay=spi0-2cs' "${boot_config}"; then
+    if grep -q '^dtparam=spi=on' "${boot_config}"; then
+      run_privileged sed -i '/^dtparam=spi=on/a dtoverlay=spi0-2cs' "${boot_config}"
+      reboot_needed=1
+    fi
+  fi
+  if [[ "${reboot_needed}" == "1" ]]; then
+    return 2
+  fi
+  return 0
+}
+
+
+# The service talks to the panel as its normal user; that needs the spi and gpio groups.
+ensure_panel_groups() {
+  local service_user="$1"
+  local group missing=()
+  for group in spi gpio; do
+    if getent group "${group}" >/dev/null 2>&1 && ! id -nG "${service_user}" | tr ' ' '\n' | grep -qx "${group}"; then
+      missing+=("${group}")
+    fi
+  done
+  if (( ${#missing[@]} > 0 )); then
+    local joined
+    joined="$(IFS=,; echo "${missing[*]}")"
+    echo "Adding ${service_user} to the ${joined} group(s) for panel access."
+    run_privileged usermod -aG "${joined}" "${service_user}"
+  fi
+}
+
+
+# Everything the panel needs. Prints a reboot hint when SPI was just turned on.
+ensure_panel_ready() {
+  local service_user="$1"
+  download_waveshare_drivers
+  if [[ "${MOCK_INSTALL}" == "1" ]]; then
+    return 0
+  fi
+  ensure_panel_groups "${service_user}"
+  local spi_status=0
+  ensure_spi_enabled || spi_status=$?
+  if [[ "${spi_status}" == "2" ]]; then
+    PANEL_REBOOT_NEEDED=1
+  fi
+}
+
+
+# Older versions drove the panel through InkyPi. Both must not use SPI at the same time, so the
+# InkyPi service is turned off. Its files stay in place so a rollback is still possible.
+retire_inkypi_service() {
+  if [[ "${MOCK_INSTALL}" == "1" ]]; then
+    return 0
+  fi
+  local dropin="/etc/systemd/system/photo-frame.service.d/after-inkypi.conf"
+  if [[ -f "${dropin}" ]]; then
+    run_privileged rm -f "${dropin}"
+    run_privileged rmdir --ignore-fail-on-non-empty "$(dirname "${dropin}")"
+    run_privileged systemctl daemon-reload
+  fi
+  if ! systemd_unit_exists 'inkypi.service'; then
+    return 0
+  fi
+  if systemctl is-enabled --quiet inkypi.service 2>/dev/null || systemctl is-active --quiet inkypi.service 2>/dev/null; then
+    echo "Turning off inkypi.service; the photo frame now drives the panel itself."
+    run_privileged systemctl disable --now inkypi.service
+  fi
+  cat <<'EOF'
+InkyPi is no longer used. Once the new version works, you can remove it with:
+  sudo rm -rf ~/InkyPi /usr/local/inkypi
+  sudo rm -f /etc/systemd/system/inkypi.service /etc/sudoers.d/photo-frame-inkypi
+  sudo systemctl daemon-reload
+EOF
 }
 
 
@@ -590,8 +625,8 @@ command = "cd {cwd} && exec {python_bin} -m app.main --config {config_path}".for
     config_path=shlex.quote(str(config_path)),
 )
 print(f"""[Unit]
-Description=Telegram to InkyPi Photo Frame
-After=network-online.target inkypi.service
+Description=Telegram e-paper photo frame
+After=network-online.target
 Wants=network-online.target
 
 [Service]

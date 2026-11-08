@@ -15,7 +15,7 @@ def _parse_local_time(time_str: str) -> dt_time:
     hour_str, minute_str = time_str.split(":")
     hour, minute = int(hour_str), int(minute_str)
     if hour == 24 and minute == 0:
-        # "24:00" (end of day, as used by InkyPi playlists) is the same wall-clock time as 00:00.
+        # "24:00" (end of day, as old InkyPi playlists used it) is the same wall-clock time as 00:00.
         return dt_time(0, 0)
     return dt_time(hour, minute)
 

@@ -15,7 +15,8 @@ from app.database import Database
 
 class MainTests(unittest.TestCase):
     @patch("app.main.build_application")
-    @patch("app.main.InkyPiAdapter")
+    @patch("app.main.make_panel")
+    @patch("app.main.FrameDisplay")
     @patch("app.main.RenderService")
     @patch("app.main.AuthService")
     @patch("app.main.Database")
@@ -30,16 +31,18 @@ class MainTests(unittest.TestCase):
         mock_database,
         mock_auth_service,
         mock_render_service,
-        mock_adapter,
+        mock_display,
+        mock_make_panel,
         mock_build_application,
     ) -> None:
+        mock_display.return_value.panel_status.return_value = (True, "Waveshare epd7in3e")
         mock_parse_args.return_value = SimpleNamespace(config=None, log_level="INFO")
         mock_load_config.return_value = SimpleNamespace(
-            storage=SimpleNamespace(),
+            storage=SimpleNamespace(inkypi_payload_dir=Path("/tmp/frame-payload")),
             database=SimpleNamespace(path="/tmp/frame.db"),
             security=SimpleNamespace(admin_user_ids=[], whitelisted_user_ids=[]),
             display=SimpleNamespace(),
-            inkypi=SimpleNamespace(),
+            legacy_inkypi_device_paths=(),
             telegram=SimpleNamespace(bot_token="token"),
         )
         mock_storage = Mock()
